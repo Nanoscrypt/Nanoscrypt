@@ -1,0 +1,18 @@
+[llm]
+model = "ollama/qwen2.5-coder"
+temperature = 0.2
+max_tokens = 4096
+
+[runtime]
+timeout_seconds = 30
+max_memory_mb = 512
+cleanup_after = true
+workspace_root = "./workspaces"
+
+[registry]
+database_url = "sqlite+aiosqlite:///./registry/tools.db"
+tools_dir = "./generated_tools"
+
+[logging]
+level = "INFO"
+json_output = false
