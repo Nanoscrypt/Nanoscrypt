@@ -43,6 +43,7 @@ Thumbs.db
 # Auto-generated directories
 generated_tools/
 workspaces/
+venv_cache/
 
 # Local config and databases
 nanoscrypt.toml
