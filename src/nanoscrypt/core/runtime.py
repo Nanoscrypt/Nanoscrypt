@@ -1,15 +1,19 @@
-import os
-import sys
-import venv
+import hashlib
 import subprocess
-from pathlib import Path
+import sys
 import time
+import venv
 from dataclasses import dataclass
+from pathlib import Path
+
 import structlog
+
+from nanoscrypt.config.settings import settings
 from nanoscrypt.models.tool import GeneratedTool
 from nanoscrypt.utils.filesystem import ensure_directory, remove_directory
 
 logger = structlog.get_logger()
+
 
 @dataclass
 class ExecutionResult:
@@ -20,17 +24,34 @@ class ExecutionResult:
     timed_out: bool
     workspace_path: Path
 
+
 class RuntimeManager:
-    """Manages isolated workspaces and execution environments for running generated tools."""
+    """Manages isolated workspaces and shared virtual environments to optimize tool execution latency."""
 
     def __init__(self, workspace_root: Path | str, timeout_seconds: int = 30):
         self.workspace_root = Path(workspace_root)
         self.timeout_seconds = timeout_seconds
+        self.venv_cache_dir = Path(settings.runtime.venv_cache_dir)
         ensure_directory(self.workspace_root)
+        ensure_directory(self.venv_cache_dir)
 
     def get_session_workspace(self, session_id: str) -> Path:
         """Returns the isolated path for a specific session's workspace."""
         return self.workspace_root / session_id
+
+    def get_dependencies_hash(self, requirements: list[str]) -> str:
+        """Generates a stable hash for a given list of dependencies."""
+        cleaned = sorted([r.strip().lower() for r in requirements if r.strip()])
+        if not cleaned:
+            return "base_env"
+        h = hashlib.md5()
+        h.update("\n".join(cleaned).encode("utf-8"))
+        return h.hexdigest()
+
+    def get_venv_directory(self, requirements: list[str]) -> Path:
+        """Returns the cached venv directory path for the given requirements."""
+        reqs_hash = self.get_dependencies_hash(requirements)
+        return self.venv_cache_dir / reqs_hash
 
     def setup_workspace(self, session_id: str, tool: GeneratedTool) -> Path:
         """Creates a workspace and writes the tool files (tool.py, requirements.txt)."""
@@ -48,48 +69,84 @@ class RuntimeManager:
 
         return workspace
 
-    def create_virtual_env(self, workspace_path: Path) -> Path:
-        """Creates a local virtual environment in the workspace."""
-        venv_dir = workspace_path / ".venv"
-        if not venv_dir.exists():
-            venv.create(venv_dir, with_pip=True)
-        return venv_dir
+    def create_virtual_env(self, venv_dir: Path) -> Path:
+        """Creates a virtual environment in the specified directory if it doesn't exist."""
+        # If the path looks like a workspace directory (i.e. contains tool.py or requirements.txt),
+        # create venv in .venv subdirectory to maintain backward compatibility
+        target_dir = venv_dir
+        if (venv_dir / "tool.py").exists() or (venv_dir / "requirements.txt").exists():
+            target_dir = venv_dir / ".venv"
 
-    def install_dependencies(self, workspace_path: Path) -> None:
-        """Installs the dependencies listed in requirements.txt into the virtual environment."""
-        venv_dir = workspace_path / ".venv"
-        req_file = workspace_path / "requirements.txt"
+        if not target_dir.exists():
+            logger.info("runtime_creating_venv_cache", path=str(target_dir))
+            venv.create(target_dir, with_pip=True)
+        return target_dir
 
-        # If requirements file is empty or missing, skip installation
-        if not req_file.exists() or not req_file.read_text(encoding="utf-8").strip():
+    def install_dependencies(self, venv_dir: Path, requirements: list[str]) -> None:
+        """Installs the list of dependencies into the cached virtual environment if needed."""
+        cleaned = [r.strip() for r in requirements if r.strip()]
+        if not cleaned:
             return
 
         # Determine python/pip executable based on OS
         if sys.platform == "win32":
             pip_executable = venv_dir / "Scripts" / "pip.exe"
+            python_executable = venv_dir / "Scripts" / "python.exe"
         else:
             pip_executable = venv_dir / "bin" / "pip"
+            python_executable = venv_dir / "bin" / "python"
 
         if not pip_executable.exists():
-            raise FileNotFoundError(f"Virtual environment pip not found at {pip_executable}")
+            raise FileNotFoundError(
+                f"Virtual environment pip not found at {pip_executable}"
+            )
 
-        # Run pip install in sandbox
-        subprocess.run(
-            [str(pip_executable), "install", "-r", str(req_file)],
-            capture_output=True,
-            check=True
-        )
+        # Check if we have already installed these requirements by checking a sentinel file
+        sentinel_file = venv_dir / ".dependencies_installed"
+        if sentinel_file.exists():
+            return
+
+        logger.info("runtime_installing_cached_dependencies", count=len(cleaned))
+
+        # Write requirements temporarily inside the venv dir to run pip install
+        temp_reqs = venv_dir / "temp_requirements.txt"
+        temp_reqs.write_text("\n".join(cleaned), encoding="utf-8")
+
+        try:
+            # Upgrade pip first to avoid package installation bugs
+            subprocess.run(
+                [str(python_executable), "-m", "pip", "install", "--upgrade", "pip"],
+                capture_output=True,
+                check=True,
+            )
+            # Run pip install
+            subprocess.run(
+                [str(pip_executable), "install", "-r", str(temp_reqs)],
+                capture_output=True,
+                check=True,
+            )
+            # Write sentinel file
+            sentinel_file.touch()
+        finally:
+            if temp_reqs.exists():
+                temp_reqs.unlink()
 
     def execute_tool(
-        self, 
-        session_id: str, 
+        self,
+        session_id: str,
         input_data: str,
-        timeout: int | None = None
+        requirements: list[str] | None = None,
+        timeout: int | None = None,
     ) -> ExecutionResult:
-        """Runs the tool in the isolated environment passing input_data via script execution wrapper."""
+        """Runs the tool wrapper script using the shared/cached virtual environment python interpreter."""
         workspace = self.get_session_workspace(session_id)
-        venv_dir = workspace / ".venv"
-        
+
+        # Determine venv dir based on requirements
+        reqs = requirements or []
+        venv_dir = self.get_venv_directory(reqs)
+        self.create_virtual_env(venv_dir)
+        self.install_dependencies(venv_dir, reqs)
+
         # Determine python executable based on OS
         if sys.platform == "win32":
             python_executable = venv_dir / "Scripts" / "python.exe"
@@ -97,7 +154,9 @@ class RuntimeManager:
             python_executable = venv_dir / "bin" / "python"
 
         if not python_executable.exists():
-            raise FileNotFoundError(f"Python executable not found at {python_executable}")
+            raise FileNotFoundError(
+                f"Python executable not found at {python_executable}"
+            )
 
         # We execute a small wrapper script to load tool.run and pass input_data
         wrapper_code = f"""
@@ -106,7 +165,7 @@ import sys
 import tool
 
 try:
-    input_str = {repr(input_data)}
+    input_str = {input_data!r}
     # Try parsing input as JSON if possible, otherwise pass as raw string
     try:
         args = json.loads(input_str)
@@ -128,7 +187,7 @@ except Exception as e:
 
         limit = timeout or self.timeout_seconds
         start_time = time.perf_counter()
-        
+
         timed_out = False
         stdout = ""
         stderr = ""
@@ -140,15 +199,23 @@ except Exception as e:
                 capture_output=True,
                 text=True,
                 timeout=limit,
-                cwd=str(workspace.resolve())
+                cwd=str(workspace.resolve()),
             )
             stdout = result.stdout
             stderr = result.stderr
             return_code = result.returncode
         except subprocess.TimeoutExpired as e:
             timed_out = True
-            stdout = e.stdout.decode('utf-8', errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or "")
-            stderr = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or "Execution timed out")
+            stdout = (
+                e.stdout.decode("utf-8", errors="replace")
+                if isinstance(e.stdout, bytes)
+                else (e.stdout or "")
+            )
+            stderr = (
+                e.stderr.decode("utf-8", errors="replace")
+                if isinstance(e.stderr, bytes)
+                else (e.stderr or "Execution timed out")
+            )
             return_code = -9
 
         runtime_ms = int((time.perf_counter() - start_time) * 1000)
@@ -166,7 +233,7 @@ except Exception as e:
             return_code=return_code,
             runtime_ms=runtime_ms,
             timed_out=timed_out,
-            workspace_path=workspace
+            workspace_path=workspace,
         )
 
     def cleanup_workspace(self, session_id: str) -> None:

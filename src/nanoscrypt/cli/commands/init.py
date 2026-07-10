@@ -1,17 +1,23 @@
 from pathlib import Path
+
 import typer
 from rich.console import Console
 
 console = Console()
 
+
 def init_cmd(
     model: str = typer.Option("ollama/qwen2.5-coder", help="Default LLM model to use"),
-    workspace: str = typer.Option("./workspaces", help="Isolated workspace directories root")
+    workspace: str = typer.Option(
+        "./workspaces", help="Isolated workspace directories root"
+    ),
 ):
     """Initializes a new Nanoscrypt project with a default nanoscrypt.toml config."""
     config_file = Path("nanoscrypt.toml")
     if config_file.exists():
-        console.print("[yellow]nanoscrypt.toml already exists in this directory. Initialization skipped.[/yellow]")
+        console.print(
+            "[yellow]nanoscrypt.toml already exists in this directory. Initialization skipped.[/yellow]"
+        )
         raise typer.Exit(code=0)
 
     config_template = f"""[llm]

@@ -1,8 +1,10 @@
 import asyncio
+from collections.abc import Coroutine
 from concurrent.futures import ThreadPoolExecutor
-from typing import Coroutine, TypeVar
+from typing import TypeVar
 
-T = TypeVar('T')
+T = TypeVar("T")
+
 
 def run_sync(coro: Coroutine[None, None, T]) -> T:
     """Runs an asynchronous coroutine synchronously, handling already running event loops cleanly."""

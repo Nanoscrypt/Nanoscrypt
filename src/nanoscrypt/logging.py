@@ -1,5 +1,7 @@
 import logging
+
 import structlog
+
 
 def setup_logging(log_level: str = "INFO", json_output: bool = False) -> None:
     """Configures structlog to format interior log traces consistently as JSON or styled text."""

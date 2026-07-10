@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Any
+
 from nanoscrypt.models.session import Session
+
 
 class ContextBuilder:
     """Assembles context prompts by merging session history, workspace files, registry tools, and active user requests."""
@@ -13,40 +15,52 @@ class ContextBuilder:
         files = []
         if not self.workspace_root.exists():
             return files
-            
+
         # Common directories to skip
-        skip_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", "workspaces", "generated_tools"}
-        
+        skip_dirs = {
+            ".git",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "node_modules",
+            "workspaces",
+            "generated_tools",
+        }
+
         for p in self.workspace_root.rglob("*"):
             # Check if any parent directories match skip list
-            if any(part in skip_dirs or part.startswith(".") for part in p.relative_to(self.workspace_root).parts[:-1]):
+            if any(
+                part in skip_dirs or part.startswith(".")
+                for part in p.relative_to(self.workspace_root).parts[:-1]
+            ):
                 continue
             if p.is_file() and not p.name.startswith("."):
                 try:
                     # Provide metadata about size and sample content
                     size = p.stat().st_size
-                    files.append({
-                        "relative_path": str(p.relative_to(self.workspace_root)),
-                        "size_bytes": size,
-                        "description": f"File with size {size} bytes"
-                    })
+                    files.append(
+                        {
+                            "relative_path": str(p.relative_to(self.workspace_root)),
+                            "size_bytes": size,
+                            "description": f"File with size {size} bytes",
+                        }
+                    )
                 except Exception:
                     pass
         return files
 
     def assemble(
-        self, 
-        user_prompt: str, 
-        session: Session, 
-        registered_tools: list[dict[str, Any]]
+        self, user_prompt: str, session: Session, registered_tools: list[dict[str, Any]]
     ) -> str:
         """Constructs the comprehensive prompt representing current state for LLM processing."""
         files = self.list_workspace_files()
-        
+
         # Format workspace files section
         files_section = "No files found in workspace."
         if files:
-            files_lines = [f"- {f['relative_path']} ({f['size_bytes']} bytes)" for f in files]
+            files_lines = [
+                f"- {f['relative_path']} ({f['size_bytes']} bytes)" for f in files
+            ]
             files_section = "\n".join(files_lines)
 
         # Format registered tools section
@@ -59,7 +73,7 @@ class ContextBuilder:
                     f"  Purpose: {t['purpose']}\n"
                     f"  Inputs: {t.get('input_schema', {})}\n"
                     f"  Outputs: {t.get('output_schema', {})}\n"
-                    f"  Success Rate: {t.get('success_rate', 0.0)*100:.1f}%\n"
+                    f"  Success Rate: {t.get('success_rate', 0.0) * 100:.1f}%\n"
                 )
             tools_section = "\n".join(tools_lines)
 

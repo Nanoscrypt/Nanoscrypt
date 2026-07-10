@@ -1,13 +1,15 @@
-import json
-import shutil
 import difflib
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 from pathlib import Path
+
 import structlog
+
+from nanoscrypt.utils.filesystem import check_path_traversal, ensure_directory
 from nanoscrypt.utils.hashing import calculate_sha256
-from nanoscrypt.utils.filesystem import ensure_directory, check_path_traversal
 
 logger = structlog.get_logger()
+
 
 class VersionManager:
     """Manages file-based snapshot directories, version pointers, and code diffs for generated tools."""
@@ -28,7 +30,7 @@ class VersionManager:
         tool_dir = self.get_tool_directory(tool_name)
         if not tool_dir.exists():
             return []
-        
+
         versions = []
         for p in tool_dir.iterdir():
             if p.is_dir() and p.name.startswith("v"):
@@ -39,16 +41,16 @@ class VersionManager:
         return sorted(versions)
 
     def create_version(
-        self, 
-        tool_name: str, 
-        code: str, 
-        requirements: list[str], 
-        manifest: dict, 
-        tests: str, 
+        self,
+        tool_name: str,
+        code: str,
+        requirements: list[str],
+        manifest: dict,
+        tests: str,
         readme: str,
         prompt: str,
         parent_version: int | None = None,
-        change_reason: str = "initial"
+        change_reason: str = "initial",
     ) -> int:
         """Saves a new tool snapshot and updates the active pointer file."""
         tool_dir = self.get_tool_directory(tool_name)
@@ -57,14 +59,18 @@ class VersionManager:
         # Determine next version number
         existing = self.get_versions(tool_name)
         next_version = max(existing, default=0) + 1
-        
+
         version_dir = tool_dir / f"v{next_version}"
         ensure_directory(version_dir)
 
         # Write files
         (version_dir / "tool.py").write_text(code, encoding="utf-8")
-        (version_dir / "requirements.txt").write_text("\n".join(requirements), encoding="utf-8")
-        (version_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        (version_dir / "requirements.txt").write_text(
+            "\n".join(requirements), encoding="utf-8"
+        )
+        (version_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
         (version_dir / "tests.py").write_text(tests, encoding="utf-8")
         (version_dir / "README.md").write_text(readme, encoding="utf-8")
 
@@ -74,25 +80,26 @@ class VersionManager:
         # Write version metadata
         meta = {
             "version": next_version,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "prompt": prompt,
             "code_hash": f"sha256:{code_hash}",
             "parent_version": parent_version,
-            "change_reason": change_reason
+            "change_reason": change_reason,
         }
-        (version_dir / "version.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        (version_dir / "version.json").write_text(
+            json.dumps(meta, indent=2), encoding="utf-8"
+        )
 
         # Update current version pointer
         (tool_dir / "current.json").write_text(
-            json.dumps({"version": next_version}), 
-            encoding="utf-8"
+            json.dumps({"version": next_version}), encoding="utf-8"
         )
 
         logger.info(
-            "version_manager_created_snapshot", 
-            tool_name=tool_name, 
+            "version_manager_created_snapshot",
+            tool_name=tool_name,
             version=next_version,
-            hash=code_hash
+            hash=code_hash,
         )
         return next_version
 
@@ -116,15 +123,20 @@ class VersionManager:
         """Updates current.json to point to a previous version number."""
         tool_dir = self.get_tool_directory(tool_name)
         version_dir = tool_dir / f"v{to_version}"
-        
+
         if not version_dir.exists():
-            raise FileNotFoundError(f"Version v{to_version} does not exist for tool {tool_name}")
+            raise FileNotFoundError(
+                f"Version v{to_version} does not exist for tool {tool_name}"
+            )
 
         (tool_dir / "current.json").write_text(
-            json.dumps({"version": to_version}), 
-            encoding="utf-8"
+            json.dumps({"version": to_version}), encoding="utf-8"
         )
-        logger.info("version_manager_rollback_successful", tool_name=tool_name, to_version=to_version)
+        logger.info(
+            "version_manager_rollback_successful",
+            tool_name=tool_name,
+            to_version=to_version,
+        )
 
     def diff(self, tool_name: str, v1: int, v2: int) -> str:
         """Computes a unified line diff of tool.py between two versions."""
@@ -132,14 +144,14 @@ class VersionManager:
         dir2 = self.get_version_directory(tool_name, v2)
 
         if not dir1 or not dir2:
-            raise FileNotFoundError(f"Cannot perform diff, one or both versions ({v1}, {v2}) do not exist.")
+            raise FileNotFoundError(
+                f"Cannot perform diff, one or both versions ({v1}, {v2}) do not exist."
+            )
 
         code1 = (dir1 / "tool.py").read_text(encoding="utf-8").splitlines()
         code2 = (dir2 / "tool.py").read_text(encoding="utf-8").splitlines()
 
         diff_lines = difflib.unified_diff(
-            code1, code2,
-            fromfile=f"v{v1}/tool.py",
-            tofile=f"v{v2}/tool.py"
+            code1, code2, fromfile=f"v{v1}/tool.py", tofile=f"v{v2}/tool.py"
         )
         return "\n".join(diff_lines)

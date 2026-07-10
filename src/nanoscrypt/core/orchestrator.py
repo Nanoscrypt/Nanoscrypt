@@ -1,21 +1,34 @@
 import json
-import structlog
 from typing import Any
+
+import structlog
+
+from nanoscrypt.config.settings import settings
+from nanoscrypt.core.approval import ApprovalGate, ApprovalType
+from nanoscrypt.core.audit import AuditEventType, AuditLogger
 from nanoscrypt.core.context import ContextBuilder
-from nanoscrypt.core.planner import Planner
 from nanoscrypt.core.generator import ToolGenerator
-from nanoscrypt.core.validator import ToolValidator
-from nanoscrypt.core.runtime import RuntimeManager
+from nanoscrypt.core.guardrails import PolicyEngine
+
+# Enterprise imports v0.2.0
+from nanoscrypt.core.hooks import HookManager, HookType
+from nanoscrypt.core.memory import EntityMemory, LongTermMemory, ShortTermMemory
+from nanoscrypt.core.pipeline import Pipeline, PipelineExecutor, PipelineStep
+from nanoscrypt.core.planner import Planner
 from nanoscrypt.core.registry import ToolRegistry
-from nanoscrypt.core.versioning import VersionManager
 from nanoscrypt.core.repair import RepairLoop
+from nanoscrypt.core.runtime import ExecutionResult, RuntimeManager
+from nanoscrypt.core.validator import ToolValidator
+from nanoscrypt.core.versioning import VersionManager
+from nanoscrypt.models.agent import Agent, AgentRole
 from nanoscrypt.models.session import Session, SessionToolOutput
 from nanoscrypt.models.tool import GeneratedTool, ToolManifest
 
 logger = structlog.get_logger()
 
+
 class Orchestrator:
-    """Coordinates the entire tool lifecycle loop: plan -> generate/reuse -> validate -> version -> execute -> record."""
+    """Enterprise-grade Orchestrator coordinating Agent Roles, Memory, Guardrails, Web-Tool Warnings, and human-in-the-loop approvals."""
 
     def __init__(
         self,
@@ -26,7 +39,12 @@ class Orchestrator:
         runtime_manager: RuntimeManager,
         registry: ToolRegistry,
         version_manager: VersionManager,
-        repair_loop: RepairLoop | None = None
+        repair_loop: RepairLoop | None = None,
+        hook_manager: HookManager | None = None,
+        approval_gate: ApprovalGate | None = None,
+        audit_logger: AuditLogger | None = None,
+        short_term_memory: ShortTermMemory | None = None,
+        long_term_memory: LongTermMemory | None = None,
     ):
         self.context_builder = context_builder
         self.planner = planner
@@ -36,7 +54,24 @@ class Orchestrator:
         self.registry = registry
         self.version_manager = version_manager
         self.repair_loop = repair_loop
-    async def _extract_parameters(self, user_prompt: str, input_schema: dict) -> str:
+
+        # Initialize enterprise modules with defaults
+        self.hook_manager = hook_manager or HookManager()
+        self.approval_gate = approval_gate or ApprovalGate()
+        self.audit_logger = audit_logger or AuditLogger(registry.session_factory)
+        self.short_term_memory = short_term_memory or ShortTermMemory(
+            max_entries=settings.memory.short_term_max_entries
+        )
+        self.long_term_memory = long_term_memory or LongTermMemory(
+            registry.session_factory
+        )
+        self.entity_memory = EntityMemory(registry.session_factory)
+        self.policy_engine = PolicyEngine()
+        self.pipeline_executor = PipelineExecutor(self)
+
+    async def _extract_parameters(
+        self, user_prompt: str, input_schema: dict, agent_name: str, session_id: str
+    ) -> str:
         """Asks the LLM to extract execution arguments matching the input schema from the user prompt."""
         if not input_schema:
             return "{}"
@@ -55,15 +90,13 @@ class Orchestrator:
             "Respond ONLY with a valid JSON dictionary containing the extracted parameters. "
             "Do not add any markdown formatting or explanation."
         )
-        
+
         user_msg = f"User Prompt: {user_prompt}\nTarget Input Schema: {input_schema}\nJSON Output:"
-        
+
         try:
             # We call the planner's LLM to generate the param dict
             raw_res = await self.planner.llm.generate(
-                prompt=user_msg,
-                system_prompt=system_prompt,
-                temperature=0.0
+                prompt=user_msg, system_prompt=system_prompt, temperature=0.0
             )
             raw_res = raw_res.strip()
             if raw_res.startswith("```json"):
@@ -73,85 +106,222 @@ class Orchestrator:
             if raw_res.endswith("```"):
                 raw_res = raw_res[:-3]
             raw_res = raw_res.strip()
-            
+
             # Verify it is valid JSON
             json.loads(raw_res)
+
+            # Log the parameter extraction audit
+            await self.audit_logger.log_event(
+                event_type=AuditEventType.LLM_CALL,
+                session_id=session_id,
+                agent_name=agent_name,
+                details={
+                    "action": "parameter_extraction",
+                    "prompt_len": len(user_prompt),
+                },
+            )
             return raw_res
         except Exception as e:
-            logger.warning("orchestrator_parameter_extraction_failed", error=str(e), fallback="{}")
+            logger.warning(
+                "orchestrator_parameter_extraction_failed", error=str(e), fallback="{}"
+            )
             return "{}"
 
     async def execute_task(
-        self, 
-        user_prompt: str, 
+        self,
+        user_prompt: str,
         session: Session,
-        pre_execute_hook = None
+        agent: Agent | None = None,
+        pre_execute_hook=None,
     ) -> dict[str, Any]:
-        log = logger.bind(session_id=session.id)
+        """Executes a task under the context of an Agent, running hooks, memory retrieval, guardrails, and approvals."""
+
+        # Determine the active agent context
+        active_agent = agent or Agent(
+            name="orchestrator",
+            role=AgentRole.PLANNER,
+            goal="Coordinate tool lifecycle to answer user query.",
+        )
+        session.active_agent = active_agent.name
+
+        log = logger.bind(
+            session_id=session.id, agent=active_agent.name, role=active_agent.role.value
+        )
         log.info("orchestrator_task_execution_started", prompt=user_prompt)
 
-        # 1. Search existing tools in registry for context assembly
-        # For simplicity, pass empty list or look up some tools
+        # 1. Fire BEFORE_PLAN Lifecycle Hook
+        hook_context = {
+            "session": session,
+            "prompt": user_prompt,
+            "agent": active_agent,
+        }
+        hook_context = await self.hook_manager.fire(HookType.BEFORE_PLAN, hook_context)
+        user_prompt = hook_context.get("prompt", user_prompt)
+
+        # 2. Query Long-Term Memory for contextual recall
+        past_memories = []
+        if settings.memory.enabled:
+            past_memories = await self.long_term_memory.recall(
+                user_prompt[:50], category="tasks"
+            )
+            self.short_term_memory.add(
+                "user", user_prompt, {"agent": active_agent.name}
+            )
+
+        # 3. Search existing tools in registry for context assembly
         all_tools = await self.registry.search("")
         serialized_tools = []
         for t in all_tools:
-            serialized_tools.append({
-                "name": t.name,
-                "purpose": t.purpose,
-                "input_schema": t.input_schema,
-                "output_schema": t.output_schema,
-                "success_rate": t.success_rate
-            })
+            serialized_tools.append(
+                {
+                    "name": t.name,
+                    "purpose": t.purpose,
+                    "input_schema": t.input_schema,
+                    "output_schema": t.output_schema,
+                    "success_rate": t.success_rate,
+                }
+            )
 
-        # 2. Build Context Prompt
+        # 4. Build Context Prompt
         assembled_prompt = self.context_builder.assemble(
-            user_prompt=user_prompt,
-            session=session,
-            registered_tools=serialized_tools
+            user_prompt=user_prompt, session=session, registered_tools=serialized_tools
         )
 
-        # 3. Call Planner
+        # Inject memory recall results into prompt if present
+        if past_memories:
+            memory_context = "\n=== RECALLED MEMORIES ===\n" + "\n".join(
+                f"- Task pattern: {m['key']} -> Result: {m['value']}"
+                for m in past_memories
+            )
+            assembled_prompt = memory_context + "\n" + assembled_prompt
+
+        # Inject Agent goals & backstory
+        agent_context = (
+            f"=== ACTIVE AGENT CONTROLLER ===\n"
+            f"Agent Name: {active_agent.name}\n"
+            f"Role: {active_agent.role.value}\n"
+            f"Goal: {active_agent.goal}\n"
+            f"Backstory: {active_agent.backstory}\n\n"
+        )
+        assembled_prompt = agent_context + assembled_prompt
+
+        # 5. Call Planner LLM
         decision = await self.planner.decide(assembled_prompt)
         log.info("orchestrator_planner_decision", action=decision.action)
 
+        # Log LLM call to audit logger
+        await self.audit_logger.log_event(
+            event_type=AuditEventType.LLM_CALL,
+            session_id=session.id,
+            agent_name=active_agent.name,
+            details={
+                "action": "planning_decision",
+                "decision_action": decision.action,
+                "tool_name": decision.tool_name,
+            },
+        )
+
+        # Fire AFTER_PLAN Lifecycle Hook
+        hook_context.update({"decision": decision})
+        hook_context = await self.hook_manager.fire(HookType.AFTER_PLAN, hook_context)
+
+        # 6. Handle planning actions
         if decision.action == "direct_response":
+            if settings.memory.enabled:
+                self.short_term_memory.add(
+                    "assistant", decision.reasoning, {"action": "direct_response"}
+                )
             return {
                 "status": "completed",
                 "action_taken": "direct_response",
-                "response": decision.reasoning
+                "response": decision.reasoning,
             }
 
         if decision.action == "clarify":
             return {
                 "status": "clarification_needed",
                 "action_taken": "clarify",
-                "response": decision.reasoning
+                "response": decision.reasoning,
             }
+
+        if decision.action == "execute_pipeline":
+            # Handle multi-tool pipelines (chaining)
+            steps = [
+                PipelineStep(
+                    tool_name=s.get("tool_name", ""),
+                    input_mapping=s.get("input_mapping", {}),
+                )
+                for s in decision.pipeline_steps
+            ]
+
+            pipeline = Pipeline(name=f"pipeline_{session.id}", steps=steps)
+
+            # Risk check the pipeline
+            pipeline_risk = decision.risk_level or "medium"
+            if self.approval_gate.should_require_approval(
+                ApprovalType.HIGH_RISK_OPERATION, pipeline_risk
+            ):
+                approved = await self.approval_gate.request_approval(
+                    session_id=session.id,
+                    approval_type=ApprovalType.HIGH_RISK_OPERATION,
+                    description=f"Execute multi-tool pipeline: {', '.join(s.tool_name for s in steps)}",
+                    risk_level=pipeline_risk,
+                    resource_details={"pipeline": pipeline.model_dump()},
+                    agent_name=active_agent.name,
+                )
+                if not approved:
+                    return {
+                        "status": "denied",
+                        "action_taken": "execute_pipeline",
+                        "error": "Pipeline execution denied by security approval policy.",
+                    }
+
+            res = await self.pipeline_executor.execute(pipeline, session, {})
+            return res
 
         tool_name = decision.tool_name
         if not tool_name:
             return {
                 "status": "error",
-                "message": "Planner requested tool action but failed to name the tool."
+                "message": "Planner requested tool action but failed to name the tool.",
             }
 
         target_tool = None
         version_number = 1
 
-        # 4. Handle Tool Reuse or Generation
+        # 7. Check if tool already exists and can be reused
         if decision.action == "reuse_tool" or decision.reuse_existing:
             db_tool = await self.registry.get(tool_name)
             if db_tool:
-                log.info("orchestrator_reusing_tool", tool_name=tool_name, version=db_tool.current_version)
-                
-                # Fetch tool files from the VersionManager storage directory
-                v_dir = self.version_manager.get_version_directory(tool_name, db_tool.current_version)
+                log.info(
+                    "orchestrator_reusing_tool",
+                    tool_name=tool_name,
+                    version=db_tool.current_version,
+                )
+
+                v_dir = self.version_manager.get_version_directory(
+                    tool_name, db_tool.current_version
+                )
                 if v_dir and (v_dir / "tool.py").exists():
                     code = (v_dir / "tool.py").read_text(encoding="utf-8")
-                    reqs = (v_dir / "requirements.txt").read_text(encoding="utf-8").splitlines() if (v_dir / "requirements.txt").exists() else []
-                    readme = (v_dir / "README.md").read_text(encoding="utf-8") if (v_dir / "README.md").exists() else ""
-                    tests = (v_dir / "tests.py").read_text(encoding="utf-8") if (v_dir / "tests.py").exists() else ""
-                    
+                    reqs = (
+                        (v_dir / "requirements.txt")
+                        .read_text(encoding="utf-8")
+                        .splitlines()
+                        if (v_dir / "requirements.txt").exists()
+                        else []
+                    )
+                    readme = (
+                        (v_dir / "README.md").read_text(encoding="utf-8")
+                        if (v_dir / "README.md").exists()
+                        else ""
+                    )
+                    tests = (
+                        (v_dir / "tests.py").read_text(encoding="utf-8")
+                        if (v_dir / "tests.py").exists()
+                        else ""
+                    )
+
                     target_tool = GeneratedTool(
                         name=db_tool.name,
                         code=code,
@@ -162,68 +332,135 @@ class Orchestrator:
                             entry=db_tool.entry_point,
                             dependencies=db_tool.dependencies,
                             input_schema=db_tool.input_schema,
-                            output_schema=db_tool.output_schema
+                            output_schema=db_tool.output_schema,
                         ),
                         tests=tests,
-                        readme=readme
+                        readme=readme,
                     )
                     version_number = db_tool.current_version
                 else:
-                    log.warning("orchestrator_stored_version_files_missing_regenerating")
+                    log.warning(
+                        "orchestrator_stored_version_files_missing_regenerating"
+                    )
             else:
-                log.warning("orchestrator_tool_requested_for_reuse_not_found_generating")
+                log.warning(
+                    "orchestrator_tool_requested_for_reuse_not_found_generating"
+                )
 
-        # Fallback to generation if tool wasn't found or requested as new
+        # 8. Generate New Tool if not found or requested
         if not target_tool:
             log.info("orchestrator_generating_new_tool", tool_name=tool_name)
+
+            # Fire BEFORE_GENERATE hook
+            hook_context = await self.hook_manager.fire(
+                HookType.BEFORE_GENERATE, hook_context
+            )
+
+            # Security/HITL Check: Does tool generation require approval?
+            if self.approval_gate.should_require_approval(
+                ApprovalType.TOOL_GENERATION, decision.risk_level
+            ):
+                approved = await self.approval_gate.request_approval(
+                    session_id=session.id,
+                    approval_type=ApprovalType.TOOL_GENERATION,
+                    description=f"Synthesize new tool: {tool_name} ({decision.tool_purpose})",
+                    risk_level=decision.risk_level,
+                    resource_details={
+                        "tool_name": tool_name,
+                        "purpose": decision.tool_purpose,
+                    },
+                    agent_name=active_agent.name,
+                )
+                if not approved:
+                    await self.audit_logger.log_event(
+                        event_type=AuditEventType.APPROVAL_DENIED,
+                        session_id=session.id,
+                        agent_name=active_agent.name,
+                        details={"tool_name": tool_name, "operation": "generation"},
+                    )
+                    return {
+                        "status": "denied",
+                        "action_taken": "generate_tool",
+                        "error": "Tool synthesis denied by security policy approval gate.",
+                    }
+
+            # Generate
             target_tool = await self.generator.generate(decision)
 
-            # Validate tool
+            # Audit generate
+            await self.audit_logger.log_event(
+                event_type=AuditEventType.TOOL_GENERATED,
+                session_id=session.id,
+                agent_name=active_agent.name,
+                details={
+                    "tool_name": tool_name,
+                    "requirements": target_tool.requirements,
+                },
+            )
+
+            # Fire AFTER_GENERATE hook
+            hook_context.update({"tool": target_tool})
+            hook_context = await self.hook_manager.fire(
+                HookType.AFTER_GENERATE, hook_context
+            )
+
+            # Validate tool with policies
             val_result = self.validator.validate(target_tool)
             if not val_result.is_valid:
-                errors = [iss.message for iss in val_result.issues if iss.severity == "error"]
-                log.warning("orchestrator_tool_initial_validation_failed", errors=errors)
-                
+                errors = [
+                    iss.message for iss in val_result.issues if iss.severity == "error"
+                ]
+                log.warning(
+                    "orchestrator_tool_initial_validation_failed", errors=errors
+                )
+
+                await self.audit_logger.log_event(
+                    event_type=AuditEventType.POLICY_VIOLATION,
+                    session_id=session.id,
+                    agent_name=active_agent.name,
+                    details={"tool_name": tool_name, "issues": errors},
+                )
+
                 if self.repair_loop:
-                    log.info("orchestrator_triggering_repair_loop_on_validation_failure")
-                    from nanoscrypt.core.runtime import ExecutionResult
+                    log.info(
+                        "orchestrator_triggering_repair_loop_on_validation_failure"
+                    )
+
                     dummy_failure = ExecutionResult(
                         stdout="",
                         stderr="\n".join(errors),
                         return_code=-1,
                         runtime_ms=0,
                         timed_out=False,
-                        workspace_path=self.runtime_manager.get_session_workspace(session.id)
+                        workspace_path=self.runtime_manager.get_session_workspace(
+                            session.id
+                        ),
                     )
-                    
+
                     self.runtime_manager.setup_workspace(session.id, target_tool)
-                    self.runtime_manager.create_virtual_env(self.runtime_manager.get_session_workspace(session.id))
-                    self.runtime_manager.install_dependencies(self.runtime_manager.get_session_workspace(session.id))
 
                     repaired, _ = await self.repair_loop.repair_tool(
                         session_id=session.id,
                         tool=target_tool,
                         failure_result=dummy_failure,
-                        tool_purpose=decision.tool_purpose or "utility"
+                        tool_purpose=decision.tool_purpose or "utility",
                     )
                     if repaired:
                         target_tool = repaired
-                        # Re-validate repaired tool
                         val_result = self.validator.validate(target_tool)
                     else:
                         return {
                             "status": "failed",
                             "action_taken": "validation",
-                            "errors": errors
+                            "errors": errors,
                         }
                 else:
                     return {
                         "status": "failed",
                         "action_taken": "validation",
-                        "errors": errors
+                        "errors": errors,
                     }
 
-            # Update formatted code
             if val_result.formatted_code:
                 target_tool.code = val_result.formatted_code
 
@@ -235,65 +472,140 @@ class Orchestrator:
                 manifest=target_tool.manifest.model_dump(),
                 tests=target_tool.tests,
                 readme=target_tool.readme,
-                prompt=user_prompt
+                prompt=user_prompt,
             )
 
             # Register in database
             await self.registry.register(
                 tool=target_tool,
-                code_hash=self.version_manager.diff(tool_name, version_number, version_number) or "initial",
-                prompt_used=user_prompt
+                code_hash=self.version_manager.diff(
+                    tool_name, version_number, version_number
+                )
+                or "initial",
+                prompt_used=user_prompt,
             )
 
-        # Check security access indicators and invoke pre-execution hook
-        if pre_execute_hook:
-            scan_res = self.validator.scan_resource_access(target_tool.code)
-            if scan_res["file_access"] or scan_res["network_access"]:
-                log.info("orchestrator_triggering_security_approval_hook", scan=scan_res)
-                # Handle potential sync/async callbacks
-                import inspect
-                if inspect.iscoroutinefunction(pre_execute_hook):
-                    approved = await pre_execute_hook(tool_name, scan_res)
-                else:
-                    approved = pre_execute_hook(tool_name, scan_res)
+        # 9. Resource Scan and HITL warnings before execution
+        scan_res = self.validator.scan_resource_access(target_tool.code)
+
+        # User warned/approved for web tools specifically
+        if scan_res["network_access"]:
+            log.warn("orchestrator_web_tool_detected", tool_name=tool_name)
+
+            # Fire ON_APPROVAL_REQUIRED hook
+            await self.hook_manager.fire(
+                HookType.ON_APPROVAL_REQUIRED,
+                {"tool_name": tool_name, "scan": scan_res},
+            )
+
+            # Check approval gate specifically for web access
+            approved = await self.approval_gate.request_approval(
+                session_id=session.id,
+                approval_type=ApprovalType.WEB_ACCESS,
+                description=f"Execute tool '{tool_name}' which performs web network connections.",
+                risk_level="high",
+                resource_details=scan_res,
+                agent_name=active_agent.name,
+            )
+
+            if not approved:
+                # Callback support backward compatibility (e.g. CLI pre_execute_hook)
+                if pre_execute_hook:
+                    import inspect
+
+                    if inspect.iscoroutinefunction(pre_execute_hook):
+                        approved = await pre_execute_hook(tool_name, scan_res)
+                    else:
+                        approved = pre_execute_hook(tool_name, scan_res)
 
                 if not approved:
                     log.warning("orchestrator_execution_denied_by_user")
+                    await self.audit_logger.log_event(
+                        event_type=AuditEventType.APPROVAL_DENIED,
+                        session_id=session.id,
+                        agent_name=active_agent.name,
+                        details={
+                            "tool_name": tool_name,
+                            "operation": "execution",
+                            "reason": "web_access_denied",
+                        },
+                    )
                     return {
                         "status": "denied",
                         "action_taken": "execute_tool",
-                        "error": "Execution denied by user due to resource access permissions."
+                        "error": "Execution denied by user because tool accesses external network resources.",
                     }
 
-        # 5. Execute Tool inside Runtime Sandbox
-        log.info("orchestrator_setting_up_runtime", tool_name=tool_name)
-        self.runtime_manager.setup_workspace(session.id, target_tool)
-        self.runtime_manager.create_virtual_env(self.runtime_manager.get_session_workspace(session.id))
-        self.runtime_manager.install_dependencies(self.runtime_manager.get_session_workspace(session.id))
+        # Check approvals for file access or generic execution
+        elif scan_res["file_access"] and self.approval_gate.should_require_approval(
+            ApprovalType.FILE_ACCESS, decision.risk_level
+        ):
+            approved = await self.approval_gate.request_approval(
+                session_id=session.id,
+                approval_type=ApprovalType.FILE_ACCESS,
+                description=f"Execute tool '{tool_name}' which accesses the local file system.",
+                risk_level=decision.risk_level,
+                resource_details=scan_res,
+                agent_name=active_agent.name,
+            )
+            if not approved:
+                return {
+                    "status": "denied",
+                    "action_taken": "execute_tool",
+                    "error": "Execution denied by user due to local file system access restrictions.",
+                }
 
-        log.info("orchestrator_executing_tool_run", tool_name=tool_name)
-        # Extract arguments matching the input schema from the user prompt
-        tool_input = await self._extract_parameters(
-            user_prompt=user_prompt,
-            input_schema=target_tool.manifest.input_schema if target_tool.manifest else {}
+        # 10. Execute Tool inside Runtime Sandbox
+        log.info("orchestrator_setting_up_runtime", tool_name=tool_name)
+
+        # Fire BEFORE_EXECUTE Hook
+        await self.hook_manager.fire(
+            HookType.BEFORE_EXECUTE, {"tool": target_tool, "session": session}
         )
 
-        exec_res = self.runtime_manager.execute_tool(session.id, tool_input)
+        self.runtime_manager.setup_workspace(session.id, target_tool)
+
+        log.info("orchestrator_executing_tool_run", tool_name=tool_name)
+        tool_input = await self._extract_parameters(
+            user_prompt=user_prompt,
+            input_schema=target_tool.manifest.input_schema
+            if target_tool.manifest
+            else {},
+            agent_name=active_agent.name,
+            session_id=session.id,
+        )
+
+        exec_res = self.runtime_manager.execute_tool(
+            session_id=session.id,
+            input_data=tool_input,
+            requirements=target_tool.requirements,
+        )
         success = exec_res.return_code == 0 and not exec_res.timed_out
 
+        # Self-repair logic
         if not success and self.repair_loop:
-            log.warning("orchestrator_execution_failed_triggering_repair_loop", error=exec_res.stderr)
+            log.warning(
+                "orchestrator_execution_failed_triggering_repair_loop",
+                error=exec_res.stderr,
+            )
+
+            await self.audit_logger.log_event(
+                event_type=AuditEventType.REPAIR_ATTEMPTED,
+                session_id=session.id,
+                agent_name=active_agent.name,
+                details={"tool_name": tool_name, "error": exec_res.stderr},
+            )
+
             repaired_tool, _ = await self.repair_loop.repair_tool(
                 session_id=session.id,
                 tool=target_tool,
                 failure_result=exec_res,
-                tool_purpose=decision.tool_purpose or "utility"
+                tool_purpose=decision.tool_purpose or "utility",
             )
             if repaired_tool:
                 target_tool = repaired_tool
                 log.info("orchestrator_re_executing_after_repair")
-                
-                # Version tool snapshot on disk
+
                 version_number = self.version_manager.create_version(
                     tool_name=tool_name,
                     code=target_tool.code,
@@ -301,25 +613,34 @@ class Orchestrator:
                     manifest=target_tool.manifest.model_dump(),
                     tests=target_tool.tests,
                     readme=target_tool.readme,
-                    prompt=user_prompt
+                    prompt=user_prompt,
                 )
 
-                # Register in database
                 await self.registry.register(
                     tool=target_tool,
-                    code_hash=self.version_manager.diff(tool_name, version_number, version_number) or "repaired",
-                    prompt_used=user_prompt
+                    code_hash=self.version_manager.diff(
+                        tool_name, version_number, version_number
+                    )
+                    or "repaired",
+                    prompt_used=user_prompt,
                 )
-                
+
                 self.runtime_manager.setup_workspace(session.id, target_tool)
-                self.runtime_manager.install_dependencies(self.runtime_manager.get_session_workspace(session.id))
-                
+
                 tool_input = await self._extract_parameters(
                     user_prompt=user_prompt,
-                    input_schema=target_tool.manifest.input_schema if target_tool.manifest else {}
+                    input_schema=target_tool.manifest.input_schema
+                    if target_tool.manifest
+                    else {},
+                    agent_name=active_agent.name,
+                    session_id=session.id,
                 )
-                
-                exec_res = self.runtime_manager.execute_tool(session.id, tool_input)
+
+                exec_res = self.runtime_manager.execute_tool(
+                    session_id=session.id,
+                    input_data=tool_input,
+                    requirements=target_tool.requirements,
+                )
                 success = exec_res.return_code == 0 and not exec_res.timed_out
 
         output_data = None
@@ -334,14 +655,14 @@ class Orchestrator:
         else:
             error_msg = exec_res.stderr or f"Exit code: {exec_res.return_code}"
 
-        # 6. Update database metrics and session run records
+        # 11. Update database metrics and session run records
         await self.registry.update_stats(
             tool_name=tool_name,
             success=success,
             runtime_ms=exec_res.runtime_ms,
             input_data={"prompt": user_prompt},
             output_data={"result": output_data} if success else None,
-            error=error_msg
+            error=error_msg,
         )
 
         session_output = SessionToolOutput(
@@ -350,14 +671,39 @@ class Orchestrator:
             success=success,
             input_data={"prompt": user_prompt},
             output_data=output_data,
-            error=error_msg
+            error=error_msg,
         )
         session.history.append(session_output)
 
+        # Audit execute
+        await self.audit_logger.log_event(
+            event_type=AuditEventType.TOOL_EXECUTED,
+            session_id=session.id,
+            agent_name=active_agent.name,
+            details={
+                "tool_name": tool_name,
+                "success": success,
+                "runtime_ms": exec_res.runtime_ms,
+            },
+        )
+
+        # Store to long-term memory if successful
+        if success and settings.memory.enabled:
+            await self.long_term_memory.store(
+                key=user_prompt[:100], value=str(output_data)[:200], category="tasks"
+            )
+            self.short_term_memory.add(
+                "assistant", str(output_data), {"tool_name": tool_name}
+            )
+
         # Cleanup sandbox workspace
-        from nanoscrypt.config.settings import settings
         if settings.runtime.cleanup_after:
             self.runtime_manager.cleanup_workspace(session.id)
+
+        # Fire AFTER_EXECUTE Hook
+        await self.hook_manager.fire(
+            HookType.AFTER_EXECUTE, {"result": session_output, "session": session}
+        )
 
         log.info("orchestrator_task_execution_completed", success=success)
         return {
@@ -367,5 +713,5 @@ class Orchestrator:
             "version": version_number,
             "output": output_data,
             "error": error_msg,
-            "runtime_ms": exec_res.runtime_ms
+            "runtime_ms": exec_res.runtime_ms,
         }
