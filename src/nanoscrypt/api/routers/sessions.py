@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 
@@ -20,5 +20,5 @@ def create_session(payload: SessionCreate, cfg: Settings = Depends(get_settings)
     workspace_path = f"{cfg.runtime.workspace_root}/{session_id}"
 
     return SessionResponse(
-        id=session_id, workspace_path=workspace_path, created_at=datetime.now(UTC)
+        id=session_id, workspace_path=workspace_path, created_at=datetime.now(timezone.utc)
     )

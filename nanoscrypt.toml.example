@@ -33,7 +33,7 @@ long_term_enabled = true
 entity_tracking = true
 
 [resilience]
-max_repair_attempts = 5
+max_repair_attempts = 3
 retry_delay_seconds = 1.0
 exponential_backoff = true
 circuit_breaker_threshold = 5

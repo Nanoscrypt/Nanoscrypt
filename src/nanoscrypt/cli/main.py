@@ -1,4 +1,13 @@
+import sys
 import typer
+
+# Reconfigure standard streams to UTF-8 to prevent encoding crashes on Windows consoles
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 from nanoscrypt.cli.commands import agents, init, run, serve, tools
 

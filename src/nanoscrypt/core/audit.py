@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -54,7 +54,7 @@ class AuditLogger:
                     details=details,
                     cost=cost,
                     token_usage=token_usage,
-                    timestamp=datetime.now(UTC),
+                    timestamp=datetime.now(timezone.utc),
                 )
                 session.add(record)
             await session.commit()

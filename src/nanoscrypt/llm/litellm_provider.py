@@ -1,4 +1,6 @@
 import asyncio
+import json
+import re
 from typing import Any
 
 import litellm
@@ -7,6 +9,7 @@ from pydantic import BaseModel
 
 from nanoscrypt.config.settings import settings
 from nanoscrypt.llm.base import LLMProvider
+from nanoscrypt.models.tool import GeneratedTool, ToolManifest
 
 logger = structlog.get_logger()
 
@@ -21,10 +24,12 @@ class LiteLLMProvider(LLMProvider):
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        # Performance/usage metrics tracking
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cost = 0.0
+        self.last_input_tokens = 0
+        self.last_output_tokens = 0
+        self.last_cost = 0.0
 
     def count_tokens(self, text: str, model: str | None = None) -> int:
         """Statically counts tokens for a string of text."""
@@ -115,14 +120,19 @@ class LiteLLMProvider(LLMProvider):
         # Track metrics
         try:
             usage = response.usage
+            self.last_input_tokens = usage.prompt_tokens
+            self.last_output_tokens = usage.completion_tokens
             self.total_input_tokens += usage.prompt_tokens
             self.total_output_tokens += usage.completion_tokens
 
             # LiteLLM cost calculation helper
             cost = litellm.completion_cost(completion_response=response) or 0.0
+            self.last_cost = float(cost)
             self.total_cost += float(cost)
         except Exception:
-            pass
+            self.last_input_tokens = 0
+            self.last_output_tokens = 0
+            self.last_cost = 0.0
 
         return response.choices[0].message.content or ""
 
@@ -143,6 +153,74 @@ class LiteLLMProvider(LLMProvider):
         temp = kwargs.pop("temperature", self.temperature)
         tokens = kwargs.pop("max_tokens", settings.llm.max_output_tokens)
 
+        if response_model == GeneratedTool:
+            raw_response = await self.generate(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=model,
+                temperature=temp,
+                max_tokens=tokens,
+                **kwargs
+            )
+            
+            def strip_markdown_code_block(text: str) -> str:
+                text = text.strip()
+                if text.startswith("```"):
+                    newline_idx = text.find("\n")
+                    if newline_idx != -1:
+                        text = text[newline_idx+1:].strip()
+                    else:
+                        text = text[3:].strip()
+                if text.endswith("```"):
+                    text = text[:-3].strip()
+                return text.strip()
+
+            def extract_tag(tag: str) -> str:
+                pattern = rf"<{tag}>(.*?)</{tag}>"
+                match = re.search(pattern, raw_response, re.DOTALL)
+                return match.group(1).strip() if match else ""
+
+            name = strip_markdown_code_block(extract_tag("tool_name"))
+            code = strip_markdown_code_block(extract_tag("code"))
+            requirements_raw = strip_markdown_code_block(extract_tag("requirements"))
+            manifest_raw = strip_markdown_code_block(extract_tag("manifest"))
+            tests = strip_markdown_code_block(extract_tag("tests"))
+            readme = strip_markdown_code_block(extract_tag("readme"))
+
+            if not code:
+                code_match = re.search(r"```python(.*?)```", raw_response, re.DOTALL)
+                if code_match:
+                    code = code_match.group(1).strip()
+
+            requirements = [r.strip() for r in requirements_raw.splitlines() if r.strip()]
+
+            manifest = None
+            if manifest_raw:
+                try:
+                    manifest_clean = manifest_raw
+                    manifest_dict = json.loads(manifest_clean)
+                    manifest = ToolManifest(**manifest_dict)
+                except Exception:
+                    pass
+
+            if not manifest:
+                manifest = ToolManifest(
+                    name=name or "unnamed_tool",
+                    dependencies=requirements,
+                    input_schema={},
+                    output_schema={},
+                    network=True if any(x in requirements for x in ["requests", "httpx", "urllib"]) else False
+                )
+
+            return GeneratedTool(
+                name=name or "unnamed_tool",
+                code=code,
+                requirements=requirements,
+                manifest=manifest,
+                tests=tests,
+                readme=readme
+            )
+
         response = await self._execute_with_retry(
             litellm.acompletion,
             model=model,
@@ -156,14 +234,20 @@ class LiteLLMProvider(LLMProvider):
         # Track metrics
         try:
             usage = response.usage
+            self.last_input_tokens = usage.prompt_tokens
+            self.last_output_tokens = usage.completion_tokens
             self.total_input_tokens += usage.prompt_tokens
             self.total_output_tokens += usage.completion_tokens
             cost = litellm.completion_cost(completion_response=response) or 0.0
+            self.last_cost = float(cost)
             self.total_cost += float(cost)
         except Exception:
-            pass
+            self.last_input_tokens = 0
+            self.last_output_tokens = 0
+            self.last_cost = 0.0
 
         raw_content = response.choices[0].message.content or ""
+        logger.info("llm_raw_structured_response", raw_content=raw_content)
         if issubclass(response_model, BaseModel):
             return response_model.model_validate_json(raw_content)
         return raw_content

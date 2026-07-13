@@ -1,6 +1,6 @@
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -33,7 +33,7 @@ class ApprovalRequest(BaseModel):
     resource_details: dict[str, Any] = Field(default_factory=dict)
     agent_name: str = "orchestrator"
     status: ApprovalStatus = ApprovalStatus.PENDING
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     resolved_at: datetime | None = None
     reason: str | None = None
 
@@ -84,7 +84,7 @@ class ApprovalGate:
 
         if not self.should_require_approval(approval_type, risk_level):
             req.status = ApprovalStatus.APPROVED
-            req.resolved_at = datetime.now(UTC)
+            req.resolved_at = datetime.now(timezone.utc)
             req.reason = "Auto-approved by policy threshold settings."
             self.history.append(req)
             return True
@@ -136,7 +136,7 @@ class ApprovalGate:
 
         req = self.pending_requests[request_id]
         req.status = status
-        req.resolved_at = datetime.now(UTC)
+        req.resolved_at = datetime.now(timezone.utc)
         req.reason = reason
 
         # Remove from pending list

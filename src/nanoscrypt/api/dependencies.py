@@ -53,7 +53,7 @@ async def get_orchestrator() -> Orchestrator:
     context_builder = ContextBuilder(workspace_root="./")  # Scan workspace root
     planner = Planner(llm=llm)
     generator = ToolGenerator(llm=llm)
-    validator = ToolValidator()
+    validator = ToolValidator(llm=llm)
     runtime_manager = RuntimeManager(
         workspace_root=cfg.runtime.workspace_root,
         timeout_seconds=cfg.runtime.timeout_seconds,

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
@@ -34,11 +34,11 @@ class DBTool(Base):
     status = Column(
         String, default="active", nullable=False
     )  # active, deprecated, failed
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
         DateTime,
-        default=lambda: datetime.now(UTC),
-        onupdate=lambda: datetime.now(UTC),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
     last_used = Column(DateTime, nullable=True)
@@ -64,7 +64,7 @@ class DBToolVersion(Base):
     runtime_stats = Column(
         JSON, default=dict, nullable=False
     )  # avg latency, max memory, etc.
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     tool = relationship("DBTool", back_populates="versions")
 
@@ -80,8 +80,8 @@ class DBToolExecution(Base):
     output_data = Column(JSON, default=dict, nullable=True)
     error = Column(Text, nullable=True)
     runtime_ms = Column(Integer, nullable=False)
-    started_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
-    completed_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    started_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    completed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     tool = relationship("DBTool", back_populates="executions")
 
@@ -96,11 +96,11 @@ class DBMemoryEntry(Base):
     key = Column(String, unique=True, index=True, nullable=False)
     value = Column(Text, nullable=False)
     category = Column(String, default="general", nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at = Column(
         DateTime,
-        default=lambda: datetime.now(UTC),
-        onupdate=lambda: datetime.now(UTC),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
 
@@ -115,7 +115,7 @@ class DBAuditLog(Base):
     details = Column(JSON, default=dict, nullable=False)
     cost = Column(Float, default=0.0, nullable=False)
     token_usage = Column(Integer, default=0, nullable=False)
-    timestamp = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class DBAgentDefinition(Base):
@@ -128,7 +128,7 @@ class DBAgentDefinition(Base):
     backstory = Column(Text, default="", nullable=False)
     tools = Column(JSON, default=list, nullable=False)
     permissions = Column(JSON, default=dict, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class DBApprovalRecord(Base):
@@ -142,6 +142,6 @@ class DBApprovalRecord(Base):
     resource_details = Column(JSON, default=dict, nullable=False)
     agent_name = Column(String, default="orchestrator", nullable=False)
     status = Column(String, default="pending", nullable=False)
-    timestamp = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     resolved_at = Column(DateTime, nullable=True)
     reason = Column(Text, nullable=True)

@@ -1,6 +1,6 @@
 import difflib
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -80,7 +80,7 @@ class VersionManager:
         # Write version metadata
         meta = {
             "version": next_version,
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "prompt": prompt,
             "code_hash": f"sha256:{code_hash}",
             "parent_version": parent_version,

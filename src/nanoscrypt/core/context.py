@@ -25,6 +25,7 @@ class ContextBuilder:
             "node_modules",
             "workspaces",
             "generated_tools",
+            "venv_cache",
         }
 
         for p in self.workspace_root.rglob("*"):

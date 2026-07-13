@@ -1,5 +1,5 @@
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -24,7 +24,7 @@ class ShortTermMemory:
                 "role": role,
                 "content": content,
                 "metadata": metadata or {},
-                "timestamp": datetime.now(UTC).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
 
@@ -60,7 +60,7 @@ class LongTermMemory:
 
                 if entry:
                     entry.value = value
-                    entry.updated_at = datetime.now(UTC)
+                    entry.updated_at = datetime.now(timezone.utc)
                 else:
                     entry = DBMemoryEntry(key=key, value=value, category=category)
                     session.add(entry)

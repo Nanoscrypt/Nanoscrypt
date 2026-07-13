@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import structlog
 from sqlalchemy import or_, select
@@ -77,7 +77,7 @@ class ToolRegistry:
                     # Increment version
                     version_num = db_tool.current_version + 1
                     db_tool.current_version = version_num
-                    db_tool.updated_at = datetime.now(UTC)
+                    db_tool.updated_at = datetime.now(timezone.utc)
                     db_tool.dependencies = list(
                         set(db_tool.dependencies + tool.manifest.dependencies)
                     )
@@ -156,8 +156,8 @@ class ToolRegistry:
                     output_data=output_data,
                     error=error,
                     runtime_ms=runtime_ms,
-                    started_at=datetime.now(UTC),
-                    completed_at=datetime.now(UTC),
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
                 )
                 session.add(exec_record)
 
@@ -174,8 +174,8 @@ class ToolRegistry:
                 # Update DBTool attributes
                 db_tool.usage_count = total_runs
                 db_tool.success_rate = float(successful_runs / total_runs)
-                db_tool.last_used = datetime.now(UTC)
-                db_tool.updated_at = datetime.now(UTC)
+                db_tool.last_used = datetime.now(timezone.utc)
+                db_tool.updated_at = datetime.now(timezone.utc)
 
             await session.commit()
             log.info(

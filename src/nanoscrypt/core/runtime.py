@@ -102,9 +102,14 @@ class RuntimeManager:
             )
 
         # Check if we have already installed these requirements by checking a sentinel file
+        reqs_hash = self.get_dependencies_hash(requirements)
         sentinel_file = venv_dir / ".dependencies_installed"
         if sentinel_file.exists():
-            return
+            try:
+                if sentinel_file.read_text(encoding="utf-8").strip() == reqs_hash:
+                    return
+            except Exception:
+                pass
 
         logger.info("runtime_installing_cached_dependencies", count=len(cleaned))
 
@@ -125,8 +130,8 @@ class RuntimeManager:
                 capture_output=True,
                 check=True,
             )
-            # Write sentinel file
-            sentinel_file.touch()
+            # Write sentinel file with the requirements hash
+            sentinel_file.write_text(reqs_hash, encoding="utf-8")
         finally:
             if temp_reqs.exists():
                 temp_reqs.unlink()
@@ -158,19 +163,24 @@ class RuntimeManager:
                 f"Python executable not found at {python_executable}"
             )
 
-        # We execute a small wrapper script to load tool.run and pass input_data
         wrapper_code = f"""
 import json
 import sys
+import traceback
 import tool
 
 try:
     input_str = {input_data!r}
-    # Try parsing input as JSON if possible, otherwise pass as raw string
+    # Try parsing input as JSON, then try ast.literal_eval, then fallback to raw string
+    args = None
     try:
         args = json.loads(input_str)
     except Exception:
-        args = input_str
+        try:
+            import ast
+            args = ast.literal_eval(input_str)
+        except Exception:
+            args = input_str
 
     if isinstance(args, dict):
         result = tool.run(**args)
@@ -179,7 +189,9 @@ try:
         
     print(json.dumps({{"status": "success", "output": result}}))
 except Exception as e:
-    print(json.dumps({{"status": "error", "message": str(e)}}), file=sys.stderr)
+    tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+    sys.stderr.write(tb_str + "\\n")
+    print(json.dumps({{"status": "error", "message": str(e), "traceback": tb_str}}), file=sys.stderr)
     sys.exit(1)
 """
         wrapper_file = workspace / "wrapper.py"

@@ -116,11 +116,11 @@ def run_cmd(
                 details += f"Description: {req.description}\n\n"
 
                 if req.approval_type == ApprovalType.WEB_ACCESS:
-                    details += "[bold red]⚠️ WEB SAFETY WARNING:[/bold red] This tool executes code that requests external web connectivity.\n"
+                    details += "[bold red]WEB SAFETY WARNING:[/bold red] This tool executes code that requests external web connectivity.\n"
                     if req.resource_details:
                         details += f"Resource Details: {req.resource_details}\n"
                 elif req.approval_type == ApprovalType.FILE_ACCESS:
-                    details += "[bold yellow]⚠️ File System Warning:[/bold yellow] This tool attempts to read or write local files.\n"
+                    details += "[bold yellow]File System Warning:[/bold yellow] This tool attempts to read or write local files.\n"
 
                 console.print(
                     Panel(
