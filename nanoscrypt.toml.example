@@ -1,0 +1,43 @@
+[llm]
+model = "ollama/qwen2.5-coder"
+temperature = 0.2
+max_tokens = 131072
+max_output_tokens = 8192
+retry_on_failure = true
+max_retries = 3
+token_budget = 0
+
+[runtime]
+timeout_seconds = 30
+max_memory_mb = 512
+cleanup_after = true
+workspace_root = "./workspaces"
+venv_cache_dir = "./venv_cache"
+
+[registry]
+database_url = "sqlite+aiosqlite:///./registry/tools.db"
+tools_dir = "./generated_tools"
+
+[security]
+approval_mode = "interactive"
+default_risk_threshold = "medium"
+blocked_domains = []
+allowed_domains = []
+max_file_write_mb = 10
+pii_detection = false
+
+[memory]
+enabled = true
+short_term_max_entries = 50
+long_term_enabled = true
+entity_tracking = true
+
+[resilience]
+max_repair_attempts = 3
+retry_delay_seconds = 1.0
+exponential_backoff = true
+circuit_breaker_threshold = 5
+
+[logging]
+level = "INFO"
+json_output = false
