@@ -67,6 +67,10 @@ class Orchestrator:
             registry.session_factory
         )
         self.entity_memory = EntityMemory(registry.session_factory)
+        from nanoscrypt.core.memory import UserPersonalMemory
+        self.user_personal_memory = UserPersonalMemory(registry.session_factory)
+        from nanoscrypt.core.memmachine_engine import MemMachineEngine
+        self.memmachine = MemMachineEngine(registry.session_factory)
         self.policy_engine = PolicyEngine()
         self.pipeline_executor = PipelineExecutor(self)
 
@@ -215,9 +219,29 @@ class Orchestrator:
                 }
             )
 
-        # 4. Build Context Prompt
+        # 4. Extract personal facts & fetch user profile
+        personal_profile = None
+        semantic_memories = []
+        if settings.memory.enabled:
+            await self.user_personal_memory.extract_and_store(user_prompt)
+            personal_profile = await self.user_personal_memory.get_profile()
+            await self.memmachine.add_memory(
+                user_id="default_user", agent_id=active_agent.name, text=user_prompt
+            )
+            semantic_memories = await self.memmachine.search_memories(
+                user_id="default_user", query=user_prompt
+            )
+
+        # Build Context Prompt
         assembled_prompt = self.context_builder.assemble(
-            user_prompt=user_prompt, session=session, registered_tools=serialized_tools
+            user_prompt=user_prompt,
+            session=session,
+            registered_tools=serialized_tools,
+            short_term_memory=self.short_term_memory.get_context()
+            if settings.memory.enabled
+            else None,
+            personal_profile=personal_profile,
+            semantic_memories=semantic_memories,
         )
 
         # Inject memory recall results into prompt if present
@@ -262,21 +286,22 @@ class Orchestrator:
 
         # 6. Handle planning actions
         if decision.action == "direct_response":
+            resp_val = decision.response or decision.reasoning
             if settings.memory.enabled:
                 self.short_term_memory.add(
-                    "assistant", decision.reasoning, {"action": "direct_response"}
+                    "assistant", resp_val, {"action": "direct_response"}
                 )
             return {
                 "status": "completed",
                 "action_taken": "direct_response",
-                "response": decision.reasoning,
+                "response": resp_val,
             }
 
         if decision.action == "clarify":
             return {
                 "status": "clarification_needed",
                 "action_taken": "clarify",
-                "response": decision.reasoning,
+                "response": decision.response or decision.reasoning,
             }
 
         if decision.action == "execute_pipeline":

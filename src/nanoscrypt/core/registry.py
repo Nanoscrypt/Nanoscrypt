@@ -77,6 +77,7 @@ class ToolRegistry:
                     # Increment version
                     version_num = db_tool.current_version + 1
                     db_tool.current_version = version_num
+                    db_tool.status = "active"
                     db_tool.updated_at = datetime.now(timezone.utc)
                     db_tool.dependencies = list(
                         set(db_tool.dependencies + tool.manifest.dependencies)
@@ -104,6 +105,20 @@ class ToolRegistry:
             stmt = select(DBTool).where(DBTool.name == name, DBTool.status == "active")
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
+
+    async def delete(self, name: str) -> bool:
+        """Sets the status of a tool to 'inactive' so it won't be reused."""
+        async with self.session_factory() as session:
+            async with session.begin():
+                stmt = select(DBTool).where(DBTool.name == name)
+                result = await session.execute(stmt)
+                db_tool = result.scalar_one_or_none()
+                if not db_tool:
+                    return False
+                db_tool.status = "inactive"
+                db_tool.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            return True
 
     async def search(self, query: str, limit: int = 5) -> list[DBTool]:
         """Performs simple keyword search matching tool name, purpose, or tags."""

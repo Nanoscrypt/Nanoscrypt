@@ -177,8 +177,8 @@ class LiteLLMProvider(LLMProvider):
 
             def extract_tag(tag: str) -> str:
                 pattern = rf"<{tag}>(.*?)</{tag}>"
-                match = re.search(pattern, raw_response, re.DOTALL)
-                return match.group(1).strip() if match else ""
+                matches = list(re.finditer(pattern, raw_response, re.DOTALL))
+                return matches[-1].group(1).strip() if matches else ""
 
             name = strip_markdown_code_block(extract_tag("tool_name"))
             code = strip_markdown_code_block(extract_tag("code"))
