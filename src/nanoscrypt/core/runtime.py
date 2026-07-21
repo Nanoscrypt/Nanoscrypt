@@ -1,5 +1,4 @@
 import hashlib
-import re
 import subprocess
 import sys
 import time
@@ -50,8 +49,9 @@ class RuntimeManager:
         return h.hexdigest()
 
     def get_venv_directory(self, requirements: list[str]) -> Path:
-        """Returns the cached venv directory path. Uses a shared venv to prevent duplicate installs."""
-        return self.venv_cache_dir / "shared_env"
+        """Returns the cached venv directory path for the given requirements."""
+        reqs_hash = self.get_dependencies_hash(requirements)
+        return self.venv_cache_dir / reqs_hash
 
     def setup_workspace(self, session_id: str, tool: GeneratedTool) -> Path:
         """Creates a workspace and writes the tool files (tool.py, requirements.txt)."""
@@ -71,6 +71,8 @@ class RuntimeManager:
 
     def create_virtual_env(self, venv_dir: Path) -> Path:
         """Creates a virtual environment in the specified directory if it doesn't exist."""
+        # If the path looks like a workspace directory (i.e. contains tool.py or requirements.txt),
+        # create venv in .venv subdirectory to maintain backward compatibility
         target_dir = venv_dir
         if (venv_dir / "tool.py").exists() or (venv_dir / "requirements.txt").exists():
             target_dir = venv_dir / ".venv"
@@ -99,65 +101,37 @@ class RuntimeManager:
                 f"Virtual environment pip not found at {pip_executable}"
             )
 
-        # Track installed packages inside a local index file to avoid redundant pip runs
-        index_file = venv_dir / ".installed_packages.txt"
-        installed_packages = set()
-        if index_file.exists():
+        # Check if we have already installed these requirements by checking a sentinel file
+        reqs_hash = self.get_dependencies_hash(requirements)
+        sentinel_file = venv_dir / ".dependencies_installed"
+        if sentinel_file.exists():
             try:
-                installed_packages = {
-                    line.strip().lower()
-                    for line in index_file.read_text(encoding="utf-8").splitlines()
-                    if line.strip()
-                }
+                if sentinel_file.read_text(encoding="utf-8").strip() == reqs_hash:
+                    return
             except Exception:
                 pass
 
-        # Identify which requirements are actually missing
-        missing_reqs = []
-        for req in cleaned:
-            # Parse package name by stripping version constraints, e.g. requests>=2.0 -> requests
-            pkg_name = re.split(r"[>=<!;\[\]]", req, maxsplit=1)[0].strip().lower()
-            if pkg_name not in installed_packages:
-                missing_reqs.append(req)
+        logger.info("runtime_installing_cached_dependencies", count=len(cleaned))
 
-        # If everything is already installed, skip pip entirely
-        if not missing_reqs:
-            return
-
-        logger.info("runtime_installing_cached_dependencies", count=len(missing_reqs), packages=missing_reqs)
-
-        # Write missing requirements temporarily to run pip install
+        # Write requirements temporarily inside the venv dir to run pip install
         temp_reqs = venv_dir / "temp_requirements.txt"
-        temp_reqs.write_text("\n".join(missing_reqs), encoding="utf-8")
+        temp_reqs.write_text("\n".join(cleaned), encoding="utf-8")
 
         try:
-            # Upgrade pip once if not done before
-            pip_upgrade_sentinel = venv_dir / ".pip_upgraded"
-            if not pip_upgrade_sentinel.exists():
-                try:
-                    subprocess.run(
-                        [str(python_executable), "-m", "pip", "install", "--upgrade", "pip"],
-                        capture_output=True,
-                        check=True,
-                    )
-                    pip_upgrade_sentinel.touch()
-                except Exception:
-                    pass
-
-            # Run pip install only for missing requirements
+            # Upgrade pip first to avoid package installation bugs
+            subprocess.run(
+                [str(python_executable), "-m", "pip", "install", "--upgrade", "pip"],
+                capture_output=True,
+                check=True,
+            )
+            # Run pip install
             subprocess.run(
                 [str(pip_executable), "install", "-r", str(temp_reqs)],
                 capture_output=True,
                 check=True,
             )
-
-            # Record newly installed packages in the local index
-            for req in missing_reqs:
-                pkg_name = re.split(r"[>=<!;\[\]]", req, maxsplit=1)[0].strip().lower()
-                installed_packages.add(pkg_name)
-            
-            index_file.write_text("\n".join(sorted(installed_packages)), encoding="utf-8")
-
+            # Write sentinel file with the requirements hash
+            sentinel_file.write_text(reqs_hash, encoding="utf-8")
         finally:
             if temp_reqs.exists():
                 temp_reqs.unlink()

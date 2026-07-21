@@ -73,3 +73,20 @@ def inspect_cmd(name: str):
     from nanoscrypt.utils.async_runner import run_sync
 
     run_sync(async_inspect())
+
+
+@tools_app.command("delete")
+def delete_cmd(name: str):
+    """Deletes/deprecates a tool from the active registry."""
+
+    async def async_delete():
+        registry = await get_registry()
+        success = await registry.delete(name)
+        if success:
+            console.print(f"[green]Tool '{name}' has been deprecated/marked inactive.[/green]")
+        else:
+            console.print(f"[red]Tool '{name}' not found.[/red]")
+
+    from nanoscrypt.utils.async_runner import run_sync
+
+    run_sync(async_delete())
