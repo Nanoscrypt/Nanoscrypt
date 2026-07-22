@@ -155,8 +155,8 @@ class UserPersonalMemory:
                 profile[clean_key] = e.value
             return profile
 
-    async def extract_and_store(self, text: str) -> None:
-        """Rule-based regex extraction to automatically record personal disclosures."""
+    async def _regex_extraction(self, text: str) -> None:
+        """Internal helper for fast rule-based regex extraction."""
         import re
 
         # Extract Name
@@ -201,4 +201,70 @@ class UserPersonalMemory:
         )
         if age_match:
             await self.set_trait("age", age_match.group(1).strip())
+
+    async def extract_and_store(self, text: str) -> None:
+        """Extract personal attributes robustly using fast regex and a gated LLM extraction pass."""
+        # 1. Run local regex extraction first
+        await self._regex_extraction(text)
+
+        # 2. Gating check: only trigger LLM pass if personal key indicators are present
+        keywords = {
+            "name",
+            "age",
+            "work",
+            "role",
+            "job",
+            "color",
+            "favourite",
+            "favorite",
+            "prefer",
+            "like",
+            "live",
+            "call me",
+            "i'm a",
+            "i am a",
+            "specialist",
+            "engineer",
+            "developer",
+            "architect",
+        }
+        text_lower = text.lower()
+        if not any(k in text_lower for k in keywords):
+            return
+
+        # 3. LLM Structured Extraction Pass
+        try:
+            from nanoscrypt.llm.litellm_provider import LiteLLMProvider
+            from nanoscrypt.config.settings import settings
+            import json
+
+            provider = LiteLLMProvider(default_model=settings.llm.model)
+            system_prompt = (
+                "You are an expert personal trait extractor. Analyze the user prompt and extract any personal details "
+                "about the user: their Name, Designation (job role), Age, Favorite Color, and general Preferences (tastes, tools they like, frameworks, hobbies).\n"
+                "Return ONLY a valid JSON object matching this schema. If a field is not found, omit it. Do not explain anything.\n"
+                '{"name": "string", "designation": "string", "age": "string", "favorite_color": "string", "preferences": "string"}'
+            )
+            response_str = await provider.generate(
+                prompt=f"Extract personal traits from: '{text}'",
+                system_prompt=system_prompt,
+                temperature=0.0,
+                max_tokens=150,
+            )
+
+            # Clean JSON response
+            cleaned_response = response_str.strip()
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
+
+            extracted = json.loads(cleaned_response)
+            if isinstance(extracted, dict):
+                for k, v in extracted.items():
+                    if v and isinstance(v, str) and len(v.strip()) > 0:
+                        await self.set_trait(k, v.strip())
+        except Exception as e:
+            logger.debug("llm_personal_memory_extraction_failed", error=str(e))
 
