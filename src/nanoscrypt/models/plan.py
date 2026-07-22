@@ -33,3 +33,7 @@ class PlannerDecision(BaseModel):
         description="List of pipeline steps if action is execute_pipeline. Each step is a dict with tool_name, input_mapping key-value pairs.",
     )
     reasoning: str = Field(..., description="CoT reasoning behind decision")
+    response: str | None = Field(
+        default=None,
+        description="The actual text response to show the user if action is direct_response or clarify",
+    )

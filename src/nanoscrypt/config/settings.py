@@ -25,6 +25,7 @@ class RuntimeSettings(BaseModel):
     cleanup_after: bool = True
     workspace_root: str = "./workspaces"
     venv_cache_dir: str = "./venv_cache"  # For caching virtual environments
+    capsem_enabled: bool = False
 
 
 class RegistrySettings(BaseModel):
@@ -63,6 +64,20 @@ class LoggingSettings(BaseModel):
     json_output: bool = False
 
 
+class HeadroomSettings(BaseModel):
+    enabled: bool = True
+    smart_crusher: bool = True
+    code_compression: bool = True
+    max_tool_output_tokens: int = 1500
+
+
+class MemMachineSettings(BaseModel):
+    enabled: bool = True
+    base_url: str = "http://localhost:8080"
+    project_id: str = "nanoscrypt"
+    fallback_to_sqlite: bool = True
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="NANOSCRYPT_", env_nested_delimiter="__", extra="ignore"
@@ -75,6 +90,8 @@ class Settings(BaseSettings):
     memory: MemorySettings = Field(default_factory=MemorySettings)
     resilience: ResilienceSettings = Field(default_factory=ResilienceSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    headroom: HeadroomSettings = Field(default_factory=HeadroomSettings)
+    memmachine: MemMachineSettings = Field(default_factory=MemMachineSettings)
 
 
 def load_settings(config_path: Path | str | None = None) -> Settings:
