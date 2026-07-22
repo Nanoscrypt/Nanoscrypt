@@ -170,7 +170,9 @@ def run_cmd(
                 permissions=perms,
             )
 
-        # Display header
+        # Display header with Sandbox status
+        from nanoscrypt.config.settings import settings
+        sandbox_lbl = "Google CAPSEM MicroVM (Secure)" if settings.runtime.capsem_enabled else "Local Subprocess (Host OS)"
         console.print()
         console.print(
             Align.center(
@@ -179,7 +181,7 @@ def run_cmd(
                         ("Nanoscrypt ", "cyan bold"),
                         ("- Live Execution Runtime v0.2.0", "dim"),
                     ),
-                    subtitle=f"Session: {sess_id} | Agent: {active_agent.name if active_agent else 'Default orchestrator'}",
+                    subtitle=f"Session: {sess_id} | Agent: {active_agent.name if active_agent else 'Default orchestrator'} | Sandbox: {sandbox_lbl}",
                     border_style="cyan",
                     padding=(0, 2),
                 )

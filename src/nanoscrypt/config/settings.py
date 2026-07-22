@@ -25,6 +25,7 @@ class RuntimeSettings(BaseModel):
     cleanup_after: bool = True
     workspace_root: str = "./workspaces"
     venv_cache_dir: str = "./venv_cache"  # For caching virtual environments
+    capsem_enabled: bool = False
 
 
 class RegistrySettings(BaseModel):

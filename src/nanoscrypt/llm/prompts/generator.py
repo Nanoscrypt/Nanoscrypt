@@ -64,7 +64,8 @@ MANDATORY CODING STANDARDS (follow these in ALL generated code):
    - Always use timeout=30 on every requests call.
    - Always call response.raise_for_status() after the request.
    - Always wrap in try/except handling requests.exceptions.RequestException.
-   - Always set a User-Agent header.
+   - Always set a realistic, modern browser User-Agent header (e.g., `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`) to bypass bot detection/CAPTCHA checks on public sites.
+   - Never use `urllib.request.urlopen(..., headers=...)` directly, as it raises a TypeError. You must instantiate `urllib.request.Request(url, headers=headers)` first. Even better, default to the `requests` library.
 
 3. ERROR HANDLING:
    - Wrap all external I/O (file, network, parsing) in try/except.
@@ -82,7 +83,12 @@ MANDATORY CODING STANDARDS (follow these in ALL generated code):
 6. RESOURCE CLEANUP:
    - Use `with` statements for all file and network I/O.
 
-7. OUTPUT:
+7. HTML PARSING & SCRAPING:
+   - Never parse HTML using fragile regular expressions (`re`).
+   - Use a robust parser like standard `html.parser.HTMLParser` or `BeautifulSoup` (`beautifulsoup4` dependency) to parse structured tags.
+   - Always check HTML response content for bot protection or CAPTCHA pages (e.g., matching string patterns like "ddg-captcha" or "security check") and return an error.
+
+8. OUTPUT:
    - Return values must be JSON-serializable (str, int, float, bool, list, dict, None only).
 
 COMMON LIBRARY PATTERNS (use these exact patterns when applicable):
@@ -98,13 +104,17 @@ PDF text extraction:
 
 HTTP GET:
   import requests
-  headers = {{"User-Agent": "NanoscryptTool/1.0"}}
+  headers = {{"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}}
   response = requests.get(url, timeout=30, headers=headers)
   response.raise_for_status()
   data = response.text
   Requirements: requests
 
-HTML parsing:
+HTML parsing (Standard Library):
+  from html.parser import HTMLParser
+  # Extend html.parser.HTMLParser for zero-dependency parsing.
+
+HTML parsing (BeautifulSoup):
   from bs4 import BeautifulSoup
   soup = BeautifulSoup(html, "html.parser")
   Requirements: beautifulsoup4

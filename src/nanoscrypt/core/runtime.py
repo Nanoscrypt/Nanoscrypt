@@ -205,9 +205,19 @@ except Exception as e:
         stderr = ""
         return_code = -1
 
+        # Determine execution command list
+        cmd = [str(python_executable.resolve()), "wrapper.py"]
+        if settings.runtime.capsem_enabled:
+            import shutil
+            if shutil.which("capsem"):
+                cmd = ["capsem"] + cmd
+                logger.info("runtime_executing_via_capsem_sandbox", command=cmd)
+            else:
+                logger.warning("runtime_capsem_enabled_but_binary_not_found_falling_back")
+
         try:
             result = subprocess.run(
-                [str(python_executable.resolve()), "wrapper.py"],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=limit,
