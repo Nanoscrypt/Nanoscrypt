@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import Any
 
@@ -22,6 +23,7 @@ from nanoscrypt.core.runtime import ExecutionResult, RuntimeManager
 from nanoscrypt.core.validator import ToolValidator
 from nanoscrypt.core.versioning import VersionManager
 from nanoscrypt.models.agent import Agent, AgentRole
+from nanoscrypt.models.plan import PlannerDecision
 from nanoscrypt.models.session import Session, SessionToolOutput
 from nanoscrypt.models.tool import GeneratedTool, ToolManifest
 
@@ -85,15 +87,22 @@ class Orchestrator:
         try:
             parsed = json.loads(user_prompt)
             if isinstance(parsed, dict):
-                return user_prompt
+                clean_params = {}
+                for k, v in parsed.items():
+                    val = str(v).strip()
+                    if (val.startswith("'") and val.endswith("'")) or (val.startswith('"') and val.endswith('"')):
+                        val = val[1:-1].strip()
+                    clean_params[k] = val
+                return json.dumps(clean_params)
         except Exception:
             pass
 
         system_prompt = (
-            "You are a parameter extraction assistant. Your task is to extract arguments "
-            "from the user prompt that match the target input schema, returning a JSON dictionary.\n"
-            "Respond ONLY with a valid JSON dictionary containing the extracted parameters. "
-            "Do not add any markdown formatting or explanation."
+            "You are a parameter extraction assistant. Your task is to extract execution arguments "
+            "from the user prompt matching the target input schema, returning a JSON dictionary.\n"
+            "If a parameter is a filename or file path mentioned in the user prompt (e.g. 'main.py' or 'test_folder/main.py'), extract that exact path as the filename.\n"
+            "If a content or text parameter is expected and not explicitly provided in full, infer reasonable initial content based on the filename/extension (e.g. '# main.py entry point\\nprint(\"Hello, World!\")').\n"
+            "Respond ONLY with a valid JSON dictionary containing the extracted parameters. Do not add markdown formatting or explanation."
         )
 
         user_msg = f"User Prompt: {user_prompt}\nTarget Input Schema: {input_schema}\nJSON Output:"
@@ -198,9 +207,13 @@ class Orchestrator:
         # 2. Query Long-Term Memory for contextual recall
         past_memories = []
         if settings.memory.enabled:
-            past_memories = await self.long_term_memory.recall(
-                user_prompt[:50], category="tasks"
-            )
+            try:
+                past_memories = await asyncio.wait_for(
+                    self.long_term_memory.recall(user_prompt[:50], category="tasks"),
+                    timeout=2.0,
+                )
+            except Exception:
+                past_memories = []
             self.short_term_memory.add(
                 "user", user_prompt, {"agent": active_agent.name}
             )
@@ -223,14 +236,23 @@ class Orchestrator:
         personal_profile = None
         semantic_memories = []
         if settings.memory.enabled:
-            await self.user_personal_memory.extract_and_store(user_prompt)
-            personal_profile = await self.user_personal_memory.get_profile()
-            await self.memmachine.add_memory(
-                user_id="default_user", agent_id=active_agent.name, text=user_prompt
-            )
-            semantic_memories = await self.memmachine.search_memories(
-                user_id="default_user", query=user_prompt
-            )
+            try:
+                await asyncio.wait_for(self.user_personal_memory.extract_and_store(user_prompt), timeout=3.0)
+                personal_profile = await asyncio.wait_for(self.user_personal_memory.get_profile(), timeout=2.0)
+                await asyncio.wait_for(
+                    self.memmachine.add_memory(
+                        user_id="default_user", agent_id=active_agent.name, text=user_prompt
+                    ),
+                    timeout=2.0,
+                )
+                semantic_memories = await asyncio.wait_for(
+                    self.memmachine.search_memories(
+                        user_id="default_user", query=user_prompt
+                    ),
+                    timeout=2.0,
+                )
+            except Exception as e:
+                log.debug("orchestrator_memory_step_timeout_or_error", error=str(e))
 
         # Build Context Prompt
         assembled_prompt = self.context_builder.assemble(
@@ -262,8 +284,37 @@ class Orchestrator:
         )
         assembled_prompt = agent_context + assembled_prompt
 
-        # 5. Call Planner LLM
-        decision = await self.planner.decide(assembled_prompt)
+        # 5. Call Planner LLM (or bypass if user_prompt is direct parameter payload from a pipeline step)
+        direct_tool_name = None
+        direct_params = None
+        try:
+            parsed = json.loads(user_prompt)
+            if isinstance(parsed, dict):
+                # Check if prompt specifies tool_name or matches registered tool schema
+                if "tool_name" in parsed and await self.registry.get(parsed["tool_name"]):
+                    direct_tool_name = parsed["tool_name"]
+                    direct_params = parsed.get("input_data", parsed)
+                else:
+                    # Check registered tools matching input keys
+                    for t in all_tools:
+                        if t.input_schema and any(k in parsed for k in t.input_schema.keys()):
+                            direct_tool_name = t.name
+                            direct_params = parsed
+                            break
+        except Exception:
+            pass
+
+        if direct_tool_name:
+            log.info("direct_pipeline_tool_execution_bypassing_planner", tool_name=direct_tool_name)
+            target_tool_db = await self.registry.get(direct_tool_name)
+            decision = PlannerDecision(
+                action="reuse_tool",
+                tool_name=direct_tool_name,
+                tool_purpose=target_tool_db.purpose if target_tool_db else "tool execution",
+                reasoning="Direct pipeline step payload execution.",
+            )
+        else:
+            decision = await self.planner.decide(assembled_prompt)
         log.info("orchestrator_planner_decision", action=decision.action)
 
         # Log LLM call to audit logger
@@ -285,6 +336,27 @@ class Orchestrator:
         hook_context = await self.hook_manager.fire(HookType.AFTER_PLAN, hook_context)
 
         # 6. Handle planning actions
+        if decision.pipeline_steps and len(decision.pipeline_steps) > 1:
+            all_registered = True
+            for s in decision.pipeline_steps:
+                t_name = s.get("tool_name")
+                if t_name and not (await self.registry.get(t_name)):
+                    all_registered = False
+                    break
+            if all_registered:
+                log.info("routing_to_execute_pipeline_from_steps", steps_count=len(decision.pipeline_steps))
+                decision.action = "execute_pipeline"
+
+        op_keywords = ["create", "folder", "directory", "make", "mkdir", "write", "file", "delete", "remove"]
+        prompt_lower = user_prompt.lower()
+        if decision.action == "direct_response" and any(kw in prompt_lower for kw in op_keywords):
+            log.warning("overriding_direct_response_for_workspace_operation", prompt=user_prompt)
+            decision.action = "generate_tool"
+            decision.tool_name = "workspace_file_ops_tool"
+            decision.tool_purpose = f"Perform requested workspace operation: {user_prompt}"
+            decision.input_description = "workspace parameters"
+            decision.output_description = "status of operation"
+
         if decision.action == "direct_response":
             resp_val = decision.response or decision.reasoning
             if settings.memory.enabled:
@@ -309,7 +381,7 @@ class Orchestrator:
             steps = [
                 PipelineStep(
                     tool_name=s.get("tool_name", ""),
-                    input_mapping=s.get("input_mapping", {}),
+                    input_mapping=s.get("input_mapping") if s.get("input_mapping") is not None else s.get("inputs", {}),
                 )
                 for s in decision.pipeline_steps
             ]

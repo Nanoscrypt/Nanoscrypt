@@ -27,7 +27,6 @@ class RuntimeSettings(BaseModel):
     venv_cache_dir: str = "./venv_cache"  # For caching virtual environments
     capsem_enabled: bool = False
 
-
 class RegistrySettings(BaseModel):
     database_url: str = "sqlite+aiosqlite:///./registry/tools.db"
     tools_dir: str = "./generated_tools"
