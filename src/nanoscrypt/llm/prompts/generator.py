@@ -42,7 +42,7 @@ beautifulsoup4
 
 GUIDELINES:
 - The `input_schema` in the manifest MUST be a flat key-value dict where keys are the exact parameter names of run() and values are type descriptions (e.g., {{"pdf_path": "str"}}). Do NOT use nested schemas, OpenAPI format, or keys like 'type'/'properties'.
-- Do NOT use prohibited modules (`os`, `sys`, `subprocess`, `shutil`, `ctypes`, `socket`, `importlib`, `signal`, `threading`, `multiprocessing`). They are BLOCKED by security policy! For ALL file and directory operations (creating folders, writing files, checking existence, resolving paths), you MUST use `from pathlib import Path` exclusively! Never write `import os`.
+- Do NOT use prohibited modules (`os`, `sys`, `subprocess`, `shutil`, `ctypes`, `socket`, `importlib`, `signal`, `threading`, `multiprocessing`) unless absolutely required by the tool's core purpose. For ALL file and directory operations (creating folders, writing files, checking existence, resolving paths), you MUST use `from pathlib import Path` exclusively! Never write `import os`.
 - Do NOT generate code requiring API keys, secrets, or authentication. Prefer free public APIs, RSS feeds, or keyless scraping.
 - Tests must import from the `tool` module: `from tool import run`.
 - SELF-CONTAINED TESTS: The sandbox test environment starts empty! Tests must NEVER assume external files exist. For text files, use the pytest `tmp_path` fixture to dynamically create a temporary file. For binary files (PDF, DOCX, XLSX, images), writing fake text to a file will cause the parser (like PyMuPDF) to crash! For binary files, you MUST use `unittest.mock.patch` to mock the parsing library (e.g., `patch('fitz.open')`) and return mock data, so the test doesn't crash on a fake binary file!

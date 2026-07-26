@@ -237,11 +237,18 @@ class Orchestrator:
         semantic_memories = []
         if settings.memory.enabled:
             try:
-                await asyncio.wait_for(self.user_personal_memory.extract_and_store(user_prompt), timeout=3.0)
-                personal_profile = await asyncio.wait_for(self.user_personal_memory.get_profile(), timeout=2.0)
+                await asyncio.wait_for(
+                    self.user_personal_memory.extract_and_store(user_prompt),
+                    timeout=3.0,
+                )
+                personal_profile = await asyncio.wait_for(
+                    self.user_personal_memory.get_profile(), timeout=2.0
+                )
                 await asyncio.wait_for(
                     self.memmachine.add_memory(
-                        user_id="default_user", agent_id=active_agent.name, text=user_prompt
+                        user_id="default_user",
+                        agent_id=active_agent.name,
+                        text=user_prompt,
                     ),
                     timeout=2.0,
                 )
