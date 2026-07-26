@@ -12,7 +12,7 @@ Determine the target action:
 - `reuse_tool`: Choose this if a single existing tool in the registry can do the job.
 - `generate_tool`: Choose this if no existing tool matches the capability and the task requires a single custom programmatic computation (e.g., parsing a specific file format, mathematical calculations).
 - `execute_pipeline`: Choose this if the task is complex and requires sequential tool execution (e.g., fetch data from web, parse it, clean it, and save to a CSV file). Define the pipeline steps and their input mappings.
-- `direct_response`: Choose this if the user is asking a general question, asking you to explain how something works, or performing operations that require no programmatic tool run.
+- `direct_response`: Choose this if the user is asking a general question, asking you to explain how something works, or performing operations that require no programmatic tool run. NEVER select `direct_response` if the user requests any action such as creating, deleting, writing, or managing files/folders in the workspace. For file/folder creation or modification, you MUST select `generate_tool` (or `reuse_tool`).
 - `clarify`: Choose this if the request is underspecified, contradictory, or lacks crucial inputs.
 
 Risk Assessment Guidelines:

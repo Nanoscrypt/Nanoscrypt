@@ -182,6 +182,7 @@ def test_validator_package_mappings():
     # fitz is imported, pymupdf is in requirements
     code = """import fitz
 def run() -> dict:
+    _ = fitz
     return {}
 """
     tool = GeneratedTool(

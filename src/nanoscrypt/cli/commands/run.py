@@ -12,6 +12,7 @@ from nanoscrypt.core.approval import ApprovalRequest, ApprovalType
 from nanoscrypt.models.agent import Agent, AgentRole
 from nanoscrypt.models.permissions import AgentPermissions, PermissionLevel
 from nanoscrypt.models.session import Session
+from nanoscrypt.config.settings import settings
 
 import os
 from pathlib import Path
@@ -170,16 +171,22 @@ def run_cmd(
                 permissions=perms,
             )
 
-        # Display header with Sandbox status
-        from nanoscrypt.config.settings import settings
-        sandbox_lbl = "Google CAPSEM MicroVM (Secure)" if settings.runtime.capsem_enabled else "Local Subprocess (Host OS)"
+        import shutil
+
+        capsem_active = getattr(settings.runtime, "capsem_enabled", False) and bool(shutil.which("capsem"))
+        if getattr(settings.runtime, "capsem_enabled", False):
+            sandbox_lbl = "Capsem" if capsem_active else "Process Isolation"
+        else:
+            sandbox_lbl = "Disabled"
+
         console.print()
         console.print(
             Align.center(
                 Panel(
                     Text.assemble(
                         ("Nanoscrypt ", "cyan bold"),
-                        ("- Live Execution Runtime v0.2.0", "dim"),
+                        ("- Live Execution Runtime v0.2.0\n", "dim"),
+                        (f"Session: {sess_id} | Agent: {active_agent.name if active_agent else 'Default orchestrator'} | Sandbox: {sandbox_lbl}", "yellow"),
                     ),
                     subtitle=f"Session: {sess_id} | Agent: {active_agent.name if active_agent else 'Default orchestrator'} | Sandbox: {sandbox_lbl}",
                     border_style="cyan",

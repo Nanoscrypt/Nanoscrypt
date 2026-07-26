@@ -43,17 +43,14 @@ class PipelineExecutor:
         for idx, step in enumerate(pipeline.steps):
             log.info("pipeline_step_started", idx=idx, tool_name=step.tool_name)
 
-            # Map input parameters from previous step outputs
+            # Map input parameters from previous step outputs or literal values
             step_inputs = {}
             for param, source_key in step.input_mapping.items():
                 if source_key in pipeline_outputs:
                     step_inputs[param] = pipeline_outputs[source_key]
                 else:
-                    log.warning(
-                        "pipeline_mapping_source_missing",
-                        param=param,
-                        source=source_key,
-                    )
+                    # Treat source_key as a literal parameter value if it's not a key in pipeline_outputs
+                    step_inputs[param] = source_key
 
             # Build prompt representation of parameters for orchestrator
             import json

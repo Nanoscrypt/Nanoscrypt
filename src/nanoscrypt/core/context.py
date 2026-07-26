@@ -26,29 +26,48 @@ class ContextBuilder:
             "workspaces",
             "generated_tools",
             "venv_cache",
+            "dist",
+            "build",
+            ".pytest_cache",
+            ".mypy_cache",
+            "scratch",
         }
 
-        for p in self.workspace_root.rglob("*"):
-            # Check if any parent directories match skip list
-            if any(
-                part in skip_dirs or part.startswith(".")
-                for part in p.relative_to(self.workspace_root).parts[:-1]
-            ):
-                continue
-            if p.is_file() and not p.name.startswith("."):
-                try:
-                    # Provide metadata about size and sample content
-                    size = p.stat().st_size
-                    files.append(
-                        {
-                            "relative_path": str(p.relative_to(self.workspace_root)),
-                            "size_bytes": size,
-                            "description": f"File with size {size} bytes",
-                        }
-                    )
-                except Exception:
-                    pass
-        return files
+        try:
+            for p in self.workspace_root.iterdir():
+                if p.name in skip_dirs or p.name.startswith("."):
+                    continue
+                if p.is_file():
+                    try:
+                        size = p.stat().st_size
+                        files.append(
+                            {
+                                "relative_path": p.name,
+                                "size_bytes": size,
+                                "description": f"File with size {size} bytes",
+                            }
+                        )
+                    except Exception:
+                        pass
+                elif p.is_dir():
+                    try:
+                        for sub_p in p.iterdir():
+                            if sub_p.name in skip_dirs or sub_p.name.startswith("."):
+                                continue
+                            if sub_p.is_file():
+                                size = sub_p.stat().st_size
+                                files.append(
+                                    {
+                                        "relative_path": f"{p.name}/{sub_p.name}",
+                                        "size_bytes": size,
+                                        "description": f"File with size {size} bytes",
+                                    }
+                                )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return files[:50]
 
     def assemble(
         self,

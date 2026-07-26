@@ -199,8 +199,13 @@ def _is_dependency_satisfied(mod_name: str, norm_reqs: set[str], llm=None) -> bo
                 return False
                 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            try:
+                loop = asyncio.get_running_loop()
+                is_running = loop.is_running()
+            except RuntimeError:
+                is_running = False
+
+            if is_running:
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     return executor.submit(asyncio.run, _check_via_llm()).result()
             else:

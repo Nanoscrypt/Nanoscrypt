@@ -108,6 +108,8 @@ class LiteLLMProvider(LLMProvider):
         tokens = kwargs.pop("max_tokens", settings.llm.max_output_tokens)
 
         # Execute completion inside the retry context
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600.0
         response = await self._execute_with_retry(
             litellm.acompletion,
             model=model,
@@ -221,6 +223,8 @@ class LiteLLMProvider(LLMProvider):
                 readme=readme
             )
 
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600.0
         response = await self._execute_with_retry(
             litellm.acompletion,
             model=model,
