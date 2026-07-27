@@ -13,7 +13,7 @@ class LLMSettings(BaseModel):
     model: str = "ollama/qwen2.5-coder"
     temperature: float = 0.2
     max_tokens: int = 131072  # Qwen 2.5 Coder 128K max
-    max_output_tokens: int = 8192  # Max generation length
+    max_output_tokens: int = 4096  # Max generation length (streamlined for local Ollama)
     retry_on_failure: bool = True
     max_retries: int = 3
     token_budget: int = 0  # 0 = unlimited

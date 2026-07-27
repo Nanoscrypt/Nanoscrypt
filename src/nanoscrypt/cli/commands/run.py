@@ -35,6 +35,11 @@ class FileCompleter(Completer):
             "workspaces",
             "generated_tools",
             "venv_cache",
+            "dist",
+            "build",
+            ".pytest_cache",
+            ".mypy_cache",
+            "scratch",
         }
 
     def _get_files(self) -> list[str]:
@@ -51,23 +56,47 @@ class FileCompleter(Completer):
         text = document.text_before_cursor
         if not text:
             return
-        
-        last_at_idx = text.rfind('@')
+
+        last_at_idx = text.rfind("@")
         if last_at_idx == -1:
             return
 
-        after_at = text[last_at_idx + 1:]
-        if ' ' in after_at:
+        after_at = text[last_at_idx + 1 :]
+        if " " in after_at:
             return
 
         word_to_match = after_at.lower()
         all_files = self._get_files()
-        
+
+        scored_matches = []
         for f in all_files:
             f_lower = f.lower()
-            base_lower = os.path.basename(f).lower()
-            if f_lower.startswith(word_to_match) or word_to_match in base_lower or word_to_match in f_lower:
-                yield Completion(f, start_position=-len(word_to_match))
+            base_name = os.path.basename(f)
+            base_lower = base_name.lower()
+
+            if not word_to_match:
+                # If user typed just '@', show all workspace files
+                scored_matches.append((0, f, base_name))
+            elif f_lower == word_to_match or base_lower == word_to_match:
+                scored_matches.append((1, f, base_name))
+            elif f_lower.startswith(word_to_match) or base_lower.startswith(word_to_match):
+                scored_matches.append((2, f, base_name))
+            elif word_to_match in base_lower:
+                scored_matches.append((3, f, base_name))
+            elif word_to_match in f_lower:
+                scored_matches.append((4, f, base_name))
+
+        # Sort by relevance rank then filename
+        scored_matches.sort(key=lambda item: (item[0], item[1]))
+
+        for score, rel_path, base_name in scored_matches:
+            display_meta = f"Workspace File: {rel_path}"
+            yield Completion(
+                rel_path,
+                start_position=-len(word_to_match),
+                display=rel_path,
+                display_meta=display_meta,
+            )
 
 
 
