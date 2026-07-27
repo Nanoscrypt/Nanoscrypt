@@ -311,6 +311,10 @@ class Orchestrator:
         except Exception:
             pass
 
+        explain_keywords = ["explain", "what are", "what is", "summarize", "describe", "analyze", "overview", "show", "tell me"]
+        prompt_lower = user_prompt.lower()
+        is_explain_query = (any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt) and not any(kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "])
+
         if direct_tool_name:
             log.info("direct_pipeline_tool_execution_bypassing_planner", tool_name=direct_tool_name)
             target_tool_db = await self.registry.get(direct_tool_name)
@@ -319,6 +323,12 @@ class Orchestrator:
                 tool_name=direct_tool_name,
                 tool_purpose=target_tool_db.purpose if target_tool_db else "tool execution",
                 reasoning="Direct pipeline step payload execution.",
+            )
+        elif is_explain_query:
+            log.info("direct_text_query_bypassing_planner", prompt=user_prompt)
+            decision = PlannerDecision(
+                action="direct_response",
+                reasoning="Direct text explanation query with file context.",
             )
         else:
             decision = await self.planner.decide(assembled_prompt)
@@ -354,9 +364,16 @@ class Orchestrator:
                 log.info("routing_to_execute_pipeline_from_steps", steps_count=len(decision.pipeline_steps))
                 decision.action = "execute_pipeline"
 
-        op_keywords = ["create", "folder", "directory", "make", "mkdir", "write", "file", "delete", "remove"]
+        explain_keywords = ["explain", "what are", "what is", "summarize", "describe", "analyze", "overview", "show", "tell me"]
         prompt_lower = user_prompt.lower()
-        if decision.action == "direct_response" and any(kw in prompt_lower for kw in op_keywords):
+
+        if any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt:
+            if not any(kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "]):
+                log.info("forcing_direct_response_for_explanation_request", prompt=user_prompt)
+                decision.action = "direct_response"
+
+        op_keywords = ["create", "folder", "directory", "make", "mkdir", "write", "file", "delete", "remove"]
+        if decision.action == "direct_response" and any(kw in prompt_lower for kw in op_keywords) and not any(kw in prompt_lower for kw in explain_keywords):
             log.warning("overriding_direct_response_for_workspace_operation", prompt=user_prompt)
             decision.action = "generate_tool"
             decision.tool_name = "workspace_file_ops_tool"
@@ -365,7 +382,43 @@ class Orchestrator:
             decision.output_description = "status of operation"
 
         if decision.action == "direct_response":
-            resp_val = decision.response or decision.reasoning
+            resp_val = decision.response
+            if not resp_val or resp_val == decision.reasoning:
+                system_prompt = (
+                    "You are Nanoscrypt, an expert AI software assistant. "
+                    "Provide a concise, direct, and helpful answer to the user's question based on the provided file context. "
+                    "Do not suggest writing or generating external tools."
+                )
+                clean_prompt = f"User Request: {user_prompt}\n\n"
+                if hasattr(self.context_builder, "workspace_root"):
+                    import re
+                    from pathlib import Path
+                    matches = re.findall(r'@([a-zA-Z0-9_\.\-/\\~]+)', user_prompt)
+                    for match in matches:
+                        p = Path(match) if Path(match).exists() else Path(self.context_builder.workspace_root) / match
+                        if p.exists() and p.is_file():
+                            clean_prompt += f"--- Content of {match} ---\n{p.read_text(encoding='utf-8', errors='replace')[:10000]}\n\n"
+
+                try:
+                    resp_val = await self.planner.llm.generate(
+                        prompt=clean_prompt, system_prompt=system_prompt, timeout=600.0
+                    )
+                except Exception as e:
+                    # Provide local fallback if LLM generation times out or fails
+                    file_summaries = []
+                    if hasattr(self.context_builder, "workspace_root"):
+                        import re
+                        from pathlib import Path
+                        matches = re.findall(r'@([a-zA-Z0-9_\.\-/\\~]+)', user_prompt)
+                        for match in matches:
+                            p = Path(match) if Path(match).exists() else Path(self.context_builder.workspace_root) / match
+                            if p.exists() and p.is_file():
+                                file_summaries.append(f"### {match} Content:\n```\n{p.read_text(encoding='utf-8', errors='replace')[:2000]}\n```")
+                    if file_summaries:
+                        resp_val = f"Here is the content of the referenced file(s):\n\n" + "\n\n".join(file_summaries)
+                    else:
+                        resp_val = decision.response or decision.reasoning or str(e)
+
             if settings.memory.enabled:
                 self.short_term_memory.add(
                     "assistant", resp_val, {"action": "direct_response"}
