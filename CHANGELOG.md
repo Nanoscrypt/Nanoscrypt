@@ -8,15 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-07-31
 
 ### Added
-- **Dynamic Workspace Path Resolution**: Configured system prompt templates (`generator.py`, `repair.py`) to resolve target file/directory creation relative to the root project workspace rather than temporary execution subdirectories.
-- **Runtime Environment Context Injection**: Updated `RuntimeManager.execute_tool` in `runtime.py` to pass the `PROJECT_ROOT` environment variable during tool subprocess execution.
+- **Dynamic Workspace Root Path Resolution**: Enforced pure `pathlib.Path` root workspace traversal inside `generator.py` and `repair.py` system prompts (`cwd.parts.index("workspaces")`) so synthesized tools resolve relative target paths directly to the project root directory rather than temporary execution subdirectories.
+- **Runtime Environment Context Injection**: Injected `PROJECT_ROOT` environment variable (`env["PROJECT_ROOT"]`) inside `RuntimeManager.execute_tool` (`runtime.py`) during `subprocess.run` tool invocation.
+- **Token Estimation Fallback**: Upgraded `LiteLLMProvider` (`litellm_provider.py`) to automatically estimate token usage (`self.count_tokens()`) when local LLM servers (e.g. Ollama `ollama/qwen2.5-coder`) omit token usage statistics in response headers.
+- **Target Path Directory Safety Guards**: Added target path validation (`target_path.is_dir()`) and non-empty string checks in prompt standards to prevent generated file tools from calling `unlink()` on directory paths.
+
+### Fixed
+- **AST Security Policy Violation (`import os`)**: Resolved AST validation failures (`Import of dangerous module 'os' is blocked by policy`) by removing `import os` references from system prompt code templates in `generator.py` and `repair.py`, standardizing exclusively on `from pathlib import Path`.
+- **Parameter Variable Propagation (`NameError`)**: Resolved `NameError: name 'file_or_folder_path' is not defined` by updating system prompt instructions in `generator.py` and `repair.py` to ensure target path constructors receive the function's actual parameter variable (e.g. `Path(file_path)` or `Path(folder_path)`).
+- **Windows Permission Exceptions (`[WinError 5] Access is denied`)**: Prevented Windows permission errors caused by unlinking directory targets when prompts omit target file parameters by enforcing `if target_path.is_dir(): return {"error": "..."}` guards in `generator.py`, `repair.py`, and default tool implementations (`create_file/v1/tool.py`).
+- **Missing Module Import in Runtime (`runtime.py`)**: Fixed `NameError: name 'os' is not defined` inside `runtime.py` by adding `import os` to top-level runtime imports.
+- **Session Workspace Teardown File Loss**: Fixed issue where files and directories created by tools were wiped out by `cleanup_workspace` upon session completion by ensuring tools create target outputs directly in the root workspace directory.
 
 ### Changed
-- **AST Security Policy Compliance**: Standardized prompt code templates to use `from pathlib import Path` exclusively. Removed `import os` from tool generation snippets to maintain 100% compliance with `SecurityASTVisitor.BLOCKED_IMPORTS`.
-- **Parameter Variable Name Resolution**: Updated tool generation guidelines so parameter variable names (e.g. `file_path`, `folder_path`) are properly passed to `Path()` constructors, eliminating `NameError` runtime failures.
-- **Directory Safety Guards**: Added target path directory validation (`target_path.is_dir()`) to prevent generated file-writing tools from calling `unlink()` on directory paths, preventing Windows `[WinError 5] Access is denied` exceptions.
-- **Token Usage Tracking Fallback**: Enhanced `LiteLLMProvider` in `litellm_provider.py` with fallback token counting (`count_tokens()`) for local LLM providers (e.g., Ollama) that omit token usage metadata.
-- **Planner Routing Rules**: Updated `planner.py` decision rules to enforce `generate_tool` for new capability requests rather than attempting invalid parameter reuse on existing registered tools.
+- **Planner Routing Guidelines (`planner.py`)**: Refined decision rules for `reuse_tool` vs `generate_tool` in `planner.py` to force `generate_tool` when the user requests generating a new tool by name, preventing invalid parameter reuse on existing registered tools (e.g. attempting to pass `file_path="test_tool_dir/"` to `create_file`).
+- **Tool Implementations (`create_file` & `create_folder`)**: Synchronized version 1 implementations of `create_file` and `create_folder` in both disk storage (`generated_tools/`) and SQLite database (`registry/tools.db`) with pure `pathlib.Path` root workspace path resolution.
 
 ## [0.1.0] - 2026-07-18
 
