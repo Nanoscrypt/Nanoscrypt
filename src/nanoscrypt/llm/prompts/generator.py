@@ -60,7 +60,7 @@ MANDATORY CODING STANDARDS (follow these in ALL generated code):
      if not path.exists():
          return {{"error": f"File not found: {{file_path}}"}}
    - WORKSPACE TARGET PATH FOR CREATING FILES/FOLDERS:
-     When creating files or folders, generated code MUST resolve relative paths to the root workspace directory using `pathlib.Path` ONLY (do NOT `import os` as it is blocked by policy). Be sure to pass your function's actual parameter variable (such as `file_path` or `folder_path`) into `Path()`:
+     When creating files or folders, generated code MUST resolve relative paths to the workspace root using `pathlib.Path` ONLY (do NOT `import os` as it is blocked by policy). If the process is running inside a session sandbox or a subfolder under `workspaces/cli_...`, resolve the target path relative to the current working directory's parent or the workspace root (for example using `Path.cwd().parent`, `Path("..") / folder_name`, or a root derived from the first `workspaces` segment) so created files/folders persist in the project workspace. Be sure to pass your function's actual parameter variable (such as `file_path` or `folder_path`) into `Path()`:
      ```python
      from pathlib import Path
      

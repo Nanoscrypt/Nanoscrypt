@@ -306,7 +306,7 @@ class Orchestrator:
                     direct_tool_name = parsed["tool_name"]
                     direct_params = parsed.get("input_data", parsed)
                 else:
-                    # Check registered tools matching all required input keys
+                    # Prefer the most specific registered tool match based on all required input keys.
                     for t in all_tools:
                         if t.input_schema and all(k in parsed for k in t.input_schema.keys()):
                             direct_tool_name = t.name
@@ -314,6 +314,25 @@ class Orchestrator:
                             break
         except Exception:
             pass
+
+        explain_keywords = [
+            "explain",
+            "what are",
+            "what is",
+            "summarize",
+            "describe",
+            "analyze",
+            "overview",
+            "show",
+            "tell me",
+        ]
+        prompt_lower = user_prompt.lower()
+        is_explain_query = (
+            (any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt)
+            and not any(
+                kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "]
+            )
+        )
 
         if direct_tool_name:
             log.info("direct_pipeline_tool_execution_bypassing_planner", tool_name=direct_tool_name)
@@ -323,6 +342,12 @@ class Orchestrator:
                 tool_name=direct_tool_name,
                 tool_purpose=target_tool_db.purpose if target_tool_db else "tool execution",
                 reasoning="Direct pipeline step payload execution.",
+            )
+        elif is_explain_query:
+            log.info("direct_text_query_bypassing_planner", prompt=user_prompt)
+            decision = PlannerDecision(
+                action="direct_response",
+                reasoning="Direct text explanation query with file context.",
             )
         else:
             decision = await self.planner.decide(assembled_prompt)
@@ -357,6 +382,24 @@ class Orchestrator:
             if all_registered:
                 log.info("routing_to_execute_pipeline_from_steps", steps_count=len(decision.pipeline_steps))
                 decision.action = "execute_pipeline"
+
+        if any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt:
+            if not any(kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "]):
+                log.info("forcing_direct_response_for_explanation_request", prompt=user_prompt)
+                decision.action = "direct_response"
+
+        op_keywords = ["create", "folder", "directory", "make", "mkdir", "write", "file", "delete", "remove"]
+        if (
+            decision.action == "direct_response"
+            and any(kw in prompt_lower for kw in op_keywords)
+            and not any(kw in prompt_lower for kw in explain_keywords)
+        ):
+            log.warning("overriding_direct_response_for_workspace_operation", prompt=user_prompt)
+            decision.action = "generate_tool"
+            decision.tool_name = "workspace_file_ops_tool"
+            decision.tool_purpose = f"Perform requested workspace operation: {user_prompt}"
+            decision.input_description = "workspace parameters"
+            decision.output_description = "status of operation"
 
         if decision.action == "direct_response":
             resp_val = decision.response
