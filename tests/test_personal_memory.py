@@ -44,7 +44,7 @@ async def test_user_personal_memory_regex_extraction(async_session_factory):
 
 def test_context_builder_personal_profile_rendering(tmp_path):
     builder = ContextBuilder(workspace_root=tmp_path)
-    session = Session(id="test_session")
+    session = Session(id="test_session", workspace_path="./workspaces/test_session")
     
     personal_profile = {
         "Name": "Balaji",
