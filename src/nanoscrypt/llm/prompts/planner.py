@@ -9,11 +9,11 @@ Analyze the available resources and context:
 5. Active agent role, goal, and backstory.
 
 Determine the target action:
-- `reuse_tool`: Choose this if a single existing tool in the registry can do the job.
-- `generate_tool`: Choose this if no existing tool matches the capability and the task requires a single custom programmatic computation (e.g., parsing a specific file format, mathematical calculations).
-- `execute_pipeline`: Choose this if the task is complex and requires sequential tool execution (e.g., fetch data from web, parse it, clean it, and save to a CSV file). Define the pipeline steps and their input mappings.
-- `direct_response`: Choose this if the user is asking a general question, asking you to explain how something works, or performing operations that require no programmatic tool run.
-- `clarify`: Choose this if the request is underspecified, contradictory, or lacks crucial inputs.
+- `reuse_tool`: Choose this if an existing tool in the registry directly matches the requested operation. Do NOT attempt to reuse a tool by passing incorrect parameters (e.g. do not reuse `create_file` to create a directory or folder).
+- `generate_tool`: Choose this if the request is to create a new tool, or if no tool in the registry can perform the specific action requested. Always choose `generate_tool` when the user explicitly requests generating, building, or writing a new tool by name.
+- `execute_pipeline`: Choose this if the task is complex and requires sequential tool execution.
+- `direct_response`: Choose this ONLY if the user is asking a general text question or requesting text explanations.
+- `clarify`: Choose this if the request is underspecified or lacks crucial inputs.
 
 Risk Assessment Guidelines:
 Assess and return the `risk_level` for the proposed action:
