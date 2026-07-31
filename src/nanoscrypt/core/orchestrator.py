@@ -136,6 +136,8 @@ class Orchestrator:
                             params[param_name] = 1
                         elif "bool" in desc_lower or "boolean" in desc_lower:
                             params[param_name] = True
+                        elif "path" in param_name.lower() or "file" in param_name.lower():
+                            params[param_name] = "test_file.txt"
                         else:
                             params[param_name] = "test"
                         modified = True
@@ -167,6 +169,8 @@ class Orchestrator:
                         fallback_params[param_name] = 1
                     elif "bool" in desc_lower or "boolean" in desc_lower:
                         fallback_params[param_name] = True
+                    elif "path" in param_name.lower() or "file" in param_name.lower():
+                        fallback_params[param_name] = "test_file.txt"
                     else:
                         fallback_params[param_name] = "test"
                 return json.dumps(fallback_params)
@@ -302,18 +306,33 @@ class Orchestrator:
                     direct_tool_name = parsed["tool_name"]
                     direct_params = parsed.get("input_data", parsed)
                 else:
-                    # Check registered tools matching input keys
+                    # Prefer the most specific registered tool match based on all required input keys.
                     for t in all_tools:
-                        if t.input_schema and any(k in parsed for k in t.input_schema.keys()):
+                        if t.input_schema and all(k in parsed for k in t.input_schema.keys()):
                             direct_tool_name = t.name
                             direct_params = parsed
                             break
         except Exception:
             pass
 
-        explain_keywords = ["explain", "what are", "what is", "summarize", "describe", "analyze", "overview", "show", "tell me"]
+        explain_keywords = [
+            "explain",
+            "what are",
+            "what is",
+            "summarize",
+            "describe",
+            "analyze",
+            "overview",
+            "show",
+            "tell me",
+        ]
         prompt_lower = user_prompt.lower()
-        is_explain_query = (any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt) and not any(kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "])
+        is_explain_query = (
+            (any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt)
+            and not any(
+                kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "]
+            )
+        )
 
         if direct_tool_name:
             log.info("direct_pipeline_tool_execution_bypassing_planner", tool_name=direct_tool_name)
@@ -364,16 +383,17 @@ class Orchestrator:
                 log.info("routing_to_execute_pipeline_from_steps", steps_count=len(decision.pipeline_steps))
                 decision.action = "execute_pipeline"
 
-        explain_keywords = ["explain", "what are", "what is", "summarize", "describe", "analyze", "overview", "show", "tell me"]
-        prompt_lower = user_prompt.lower()
-
         if any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt:
             if not any(kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "]):
                 log.info("forcing_direct_response_for_explanation_request", prompt=user_prompt)
                 decision.action = "direct_response"
 
         op_keywords = ["create", "folder", "directory", "make", "mkdir", "write", "file", "delete", "remove"]
-        if decision.action == "direct_response" and any(kw in prompt_lower for kw in op_keywords) and not any(kw in prompt_lower for kw in explain_keywords):
+        if (
+            decision.action == "direct_response"
+            and any(kw in prompt_lower for kw in op_keywords)
+            and not any(kw in prompt_lower for kw in explain_keywords)
+        ):
             log.warning("overriding_direct_response_for_workspace_operation", prompt=user_prompt)
             decision.action = "generate_tool"
             decision.tool_name = "workspace_file_ops_tool"

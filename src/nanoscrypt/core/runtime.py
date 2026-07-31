@@ -1,4 +1,5 @@
 import hashlib
+import os
 import subprocess
 import sys
 import time
@@ -37,7 +38,7 @@ class RuntimeManager:
 
     def get_session_workspace(self, session_id: str) -> Path:
         """Returns the isolated path for a specific session's workspace."""
-        return self.workspace_root / session_id
+        return (self.workspace_root / session_id).resolve()
 
     def get_dependencies_hash(self, requirements: list[str]) -> str:
         """Generates a stable hash for a given list of dependencies."""
@@ -215,6 +216,9 @@ except Exception as e:
             else:
                 logger.warning("runtime_capsem_enabled_but_binary_not_found_falling_back")
 
+        env = dict(os.environ)
+        env["PROJECT_ROOT"] = str(Path(".").resolve())
+
         try:
             result = subprocess.run(
                 cmd,
@@ -222,6 +226,7 @@ except Exception as e:
                 text=True,
                 timeout=limit,
                 cwd=str(workspace.resolve()),
+                env=env,
             )
             stdout = result.stdout
             stderr = result.stderr
@@ -261,5 +266,7 @@ except Exception as e:
     def cleanup_workspace(self, session_id: str) -> None:
         """Removes the entire session workspace directory."""
         workspace = self.get_session_workspace(session_id)
+        if workspace == Path(self.workspace_root).resolve():
+            return
         if workspace.exists():
             remove_directory(workspace)

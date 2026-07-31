@@ -9,10 +9,10 @@ Analyze the available resources and context:
 5. Active agent role, goal, and backstory.
 
 Determine the target action:
-- `reuse_tool`: Choose this if a single existing tool in the registry can do the job.
-- `generate_tool`: Choose this if no existing tool matches the capability and the task requires a single custom programmatic computation (e.g., parsing a specific file format, mathematical calculations).
-- `execute_pipeline`: Choose this if the task is complex and requires sequential tool execution (e.g., fetch data from web, parse it, clean it, and save to a CSV file). Define the pipeline steps and their input mappings.
-- `direct_response`: Choose this if the user is asking a question, asking you to explain/summarize/analyze something (including injected file contents from `@file`), or requesting text answers that require NO file system side effects. If the user prompt starts with or contains explanation/analysis keywords (e.g. 'explain', 'what are', 'summarize', 'describe', 'analyze', 'how does') along with `@file` references, you MUST choose `direct_response` to answer directly. NEVER select `direct_response` if the user explicitly requests workspace side effects such as creating, deleting, writing, or modifying files/folders.
+- `reuse_tool`: Choose this if an existing tool in the registry directly matches the requested operation and the provided parameters. Do NOT reuse a tool by passing incorrect parameters (for example, do not reuse `create_file` to create a directory or folder).
+- `generate_tool`: Choose this if the request is to create a new tool, or if no existing tool can perform the specific action requested. Always choose `generate_tool` when the user explicitly requests generating, building, or writing a new tool by name, or when the task requires a custom programmatic computation.
+- `execute_pipeline`: Choose this if the task is complex and requires sequential tool execution (for example, fetch data from web, parse it, clean it, and save it to a file). Define the pipeline steps and their input mappings.
+- `direct_response`: Choose this if the user is asking a general question, asking you to explain/summarize/analyze something, or requesting text answers that require no file system side effects. If the user prompt starts with or contains explanation/analysis keywords along with `@file` references, you MUST choose `direct_response` to answer directly. NEVER select `direct_response` if the user explicitly requests workspace side effects such as creating, deleting, writing, or modifying files/folders.
 - `clarify`: Choose this if the request is underspecified, contradictory, or lacks crucial inputs.
 
 Risk Assessment Guidelines:

@@ -237,17 +237,25 @@ class LiteLLMProvider(LLMProvider):
 
         # Track metrics
         try:
-            usage = response.usage
-            self.last_input_tokens = usage.prompt_tokens
-            self.last_output_tokens = usage.completion_tokens
-            self.total_input_tokens += usage.prompt_tokens
-            self.total_output_tokens += usage.completion_tokens
+            usage = getattr(response, "usage", None)
+            if usage and getattr(usage, "prompt_tokens", None) is not None:
+                self.last_input_tokens = usage.prompt_tokens
+                self.last_output_tokens = usage.completion_tokens or 0
+            else:
+                raw_text = response.choices[0].message.content or ""
+                self.last_input_tokens = self.count_tokens(prompt)
+                self.last_output_tokens = self.count_tokens(raw_text)
+
+            self.total_input_tokens += self.last_input_tokens
+            self.total_output_tokens += self.last_output_tokens
             cost = litellm.completion_cost(completion_response=response) or 0.0
             self.last_cost = float(cost)
             self.total_cost += float(cost)
         except Exception:
-            self.last_input_tokens = 0
-            self.last_output_tokens = 0
+            self.last_input_tokens = self.count_tokens(prompt)
+            self.last_output_tokens = self.count_tokens(str(response))
+            self.total_input_tokens += self.last_input_tokens
+            self.total_output_tokens += self.last_output_tokens
             self.last_cost = 0.0
 
         raw_content = response.choices[0].message.content or ""
