@@ -206,8 +206,9 @@ except Exception as e:
         stderr = ""
         return_code = -1
 
-        # Determine execution command list
-        cmd = [str(python_executable.resolve()), "wrapper.py"]
+        # Determine execution command list with absolute wrapper path
+        wrapper_path = (workspace / "wrapper.py").resolve()
+        cmd = [str(python_executable.resolve()), str(wrapper_path)]
         if settings.runtime.capsem_enabled:
             import shutil
             if shutil.which("capsem"):
@@ -216,8 +217,12 @@ except Exception as e:
             else:
                 logger.warning("runtime_capsem_enabled_but_binary_not_found_falling_back")
 
+        project_root = Path(".").resolve()
         env = dict(os.environ)
-        env["PROJECT_ROOT"] = str(Path(".").resolve())
+        env["PROJECT_ROOT"] = str(project_root)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(workspace.resolve()), env.get("PYTHONPATH", "")]
+        )
 
         try:
             result = subprocess.run(
@@ -225,7 +230,7 @@ except Exception as e:
                 capture_output=True,
                 text=True,
                 timeout=limit,
-                cwd=str(workspace.resolve()),
+                cwd=str(project_root),
                 env=env,
             )
             stdout = result.stdout

@@ -34,6 +34,7 @@ class SecurityASTVisitor(ast.NodeVisitor):
     """AST visitor that checks for dangerous calls, imports, and attributes."""
 
     BLOCKED_IMPORTS = {
+        "os",
         "sys",
         "subprocess",
         "shutil",

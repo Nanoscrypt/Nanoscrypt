@@ -19,10 +19,10 @@ beautifulsoup4
   "entry": "run",
   "dependencies": [[any requirements list here]],
   "input_schema": {{
-    "[param_name]": "[type description]"
+    "[param_name]": "[type]"
   }},
   "output_schema": {{
-    "[field_name]": "[type description]"
+    "[field_name]": "[type]"
   }},
   "network": [true or false]
 }}
@@ -41,12 +41,16 @@ beautifulsoup4
 </code>
 
 GUIDELINES:
-- The `input_schema` in the manifest MUST be a flat key-value dict where keys are the exact parameter names of run() and values are type descriptions (e.g., {{"pdf_path": "str"}}). Do NOT use nested schemas, OpenAPI format, or keys like 'type'/'properties'.
-- Do NOT use prohibited modules (`sys`, `subprocess`, `shutil`, `ctypes`, `socket`, `importlib`, `signal`, `threading`, `multiprocessing`) unless required by the tool's core purpose. You may use `os` and `pathlib.Path` for file and directory operations.
+- The `input_schema` and `output_schema` in the manifest MUST be a flat key-value dict where keys are exact parameter/field names and values are ONE of the following exact strings only: "str", "int", "float", "bool", "list", "dict", "Optional[str]", "Optional[int]", "Optional[float]", "Optional[bool]", "Optional[list]", "Optional[dict]". Do NOT use free-text descriptions, nested schemas, or OpenAPI format.
+- Do NOT use prohibited modules (`os`, `sys`, `subprocess`, `shutil`, `ctypes`, `socket`, `importlib`, `signal`, `threading`, `multiprocessing`) under any circumstances. There is no exception for "core purpose" — if a tool seems to require one of these, use the closest safe stdlib alternative instead (e.g. `pathlib.Path` instead of `os.path`, `requests`/`urllib` instead of raw `socket`). For ALL file and directory operations, you MUST use `from pathlib import Path` exclusively.
+- Do NOT use `eval`, `exec`, `pickle.loads`, `marshal.loads`, or `__import__` anywhere in generated code, including in test files. Never deserialize untrusted input with `pickle` — use `json` instead.
+- Never call `print()` for anything other than nothing at all — `run()` must communicate exclusively through its return value. No stray debug prints.
 - Do NOT generate code requiring API keys, secrets, or authentication. Prefer free public APIs, RSS feeds, or keyless scraping.
 - Tests must import from the `tool` module: `from tool import run`.
 - SELF-CONTAINED TESTS: The sandbox test environment starts empty! Tests must NEVER assume external files exist. For text files, use the pytest `tmp_path` fixture to dynamically create a temporary file. For binary files (PDF, DOCX, XLSX, images), writing fake text to a file will cause the parser (like PyMuPDF) to crash! For binary files, you MUST use `unittest.mock.patch` to mock the parsing library (e.g., `patch('fitz.open')`) and return mock data, so the test doesn't crash on a fake binary file!
+- NETWORK-FREE TESTS: Any test exercising a code path that calls `requests.get`/`requests.post`/etc. MUST mock it via `unittest.mock.patch('requests.get', ...)` (or the module-qualified equivalent). Tests must never make real HTTP requests — this makes them flaky and dependent on external services being up.
 - PYTHON 3.10 ONLY: Never use Python 3.11+ features. Never `from datetime import UTC` — use `timezone.utc`. No match-case. No ExceptionGroup. No tomllib without fallback.
+- COMPLETENESS OVER EXHAUSTIVENESS: Prioritize a complete, working `run()` and complete tests over handling every possible edge case. A shorter tool that finishes generating fully is better than a longer one that gets cut off mid-function.
 
 MANDATORY CODING STANDARDS (follow these in ALL generated code):
 
@@ -60,32 +64,13 @@ MANDATORY CODING STANDARDS (follow these in ALL generated code):
      if not path.exists():
          return {{"error": f"File not found: {{file_path}}"}}
    - WORKSPACE TARGET PATH FOR CREATING FILES/FOLDERS:
-     When creating files or folders, generated code MUST resolve relative paths to the workspace root using `pathlib.Path` ONLY (do NOT `import os` as it is blocked by policy). If the process is running inside a session sandbox or a subfolder under `workspaces/cli_...`, resolve the target path relative to the current working directory's parent or the workspace root (for example using `Path.cwd().parent`, `Path("..") / folder_name`, or a root derived from the first `workspaces` segment) so created files/folders persist in the project workspace. Be sure to pass your function's actual parameter variable (such as `file_path` or `folder_path`) into `Path()`:
-     ```python
-     from pathlib import Path
-     
-     if not file_path or not str(file_path).strip():
-         return {"error": "File path cannot be empty."}
-
-     cwd = Path.cwd().resolve()
-     if "workspaces" in cwd.parts:
-         idx = cwd.parts.index("workspaces")
-         root = Path(*cwd.parts[:idx]) if idx > 0 else cwd
-     else:
-         root = cwd
-     target_path = Path(file_path)
-     if not target_path.is_absolute():
-         target_path = (root / target_path).resolve()
-
-     if target_path.is_dir():
-         return {"error": f"Target path '{file_path}' is a directory, not a file."}
-     ```
+     Never infer or guess the workspace root from the current working directory's name or structure. Instead, `run()` must accept an explicit `output_dir: str` (or similarly named) parameter for any file/folder it creates, supplied by the caller. If no such parameter is specified in the input requirements, default to writing inside `Path.cwd()` only, and do not attempt to walk up to parent directories.
 
 2. NETWORK REQUESTS:
    - Always use timeout=30 on every requests call.
    - Always call response.raise_for_status() after the request.
    - Always wrap in try/except handling requests.exceptions.RequestException.
-   - Always set a realistic, modern browser User-Agent header (e.g., `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`) to bypass bot detection/CAPTCHA checks on public sites.
+   - Set a standard, realistic browser User-Agent header (e.g., `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`) for compatibility with servers that reject default Python client User-Agent strings. This is for standards compliance, not for defeating bot-detection or CAPTCHA systems — if a target site actively blocks automated access, the tool should surface a clear error rather than attempt to evade the block.
    - Never use `urllib.request.urlopen(..., headers=...)` directly, as it raises a TypeError. You must instantiate `urllib.request.Request(url, headers=headers)` first. Even better, default to the `requests` library.
 
 3. ERROR HANDLING:
@@ -107,7 +92,7 @@ MANDATORY CODING STANDARDS (follow these in ALL generated code):
 7. HTML PARSING & SCRAPING:
    - Never parse HTML using fragile regular expressions (`re`).
    - Use a robust parser like standard `html.parser.HTMLParser` or `BeautifulSoup` (`beautifulsoup4` dependency) to parse structured tags.
-   - Always check HTML response content for bot protection or CAPTCHA pages (e.g., matching string patterns like "ddg-captcha" or "security check") and return an error.
+   - If the response content matches signs of a bot-protection or CAPTCHA interstitial page (e.g. strings like "ddg-captcha" or "security check"), return a clear {{"error": "..."}} explaining the site blocked automated access — do not attempt to work around it.
 
 8. OUTPUT:
    - Return values must be JSON-serializable (str, int, float, bool, list, dict, None only).
@@ -146,6 +131,17 @@ Safe file reading:
   if not path.exists():
       return {{"error": f"File not found: {{file_path}}"}}
   content = path.read_text(encoding="utf-8")
+
+Mocking network calls in tests:
+  from unittest.mock import patch, MagicMock
+  @patch("tool.requests.get")
+  def test_fetch_success(mock_get):
+      mock_response = MagicMock()
+      mock_response.text = "<html>...</html>"
+      mock_response.raise_for_status.return_value = None
+      mock_get.return_value = mock_response
+      result = run(url="https://example.com")
+      assert "error" not in result
 """
 
 TOOL_GENERATION_USER_TEMPLATE = """Generate a tool package for:
@@ -158,5 +154,5 @@ Suggested dependencies: {dependencies_hint}
 
 IMPORTANT: Pay close attention to the "Original user request" above. If it contains a file path, detect the file extension and use the correct parsing library. For example, if the user references a .pdf file, you MUST use PyMuPDF (fitz) to parse it — never open() with text mode. If it references .docx, use python-docx. If .xlsx, use openpyxl.
 
-Follow all MANDATORY CODING STANDARDS from the system prompt. Validate inputs, handle errors, use correct libraries for binary files, and include timeouts on network calls.
+Follow all MANDATORY CODING STANDARDS from the system prompt. Validate inputs, handle errors, use correct libraries for binary files, mock all network and binary-parsing calls in tests, and include timeouts on network calls.
 """

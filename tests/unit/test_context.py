@@ -27,10 +27,10 @@ def test_context_builder_workspace_scan(temp_workspace):
     relative_paths = [f["relative_path"] for f in files]
     
     assert "data.csv" in relative_paths
-    assert str(Path("subdir") / "notes.txt") in relative_paths
+    assert (Path("subdir") / "notes.txt").as_posix() in relative_paths
     assert ".gitignore" not in relative_paths
     assert ".git" not in relative_paths
-    assert str(Path(".venv") / "config.txt") not in relative_paths
+    assert (Path(".venv") / "config.txt").as_posix() not in relative_paths
 
 def test_context_builder_assemble(temp_workspace):
     builder = ContextBuilder(workspace_root=temp_workspace)

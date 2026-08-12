@@ -199,6 +199,12 @@ class Orchestrator:
         )
         log.info("orchestrator_task_execution_started", prompt=user_prompt)
 
+        # Route to CodeAgentExecutor if enabled
+        if settings.runtime.code_agent_enabled:
+            from nanoscrypt.core.code_agent import CodeAgentExecutor
+            executor = CodeAgentExecutor(self)
+            return await executor.execute(user_prompt, session, active_agent)
+
         # 1. Fire BEFORE_PLAN Lifecycle Hook
         hook_context = {
             "session": session,
