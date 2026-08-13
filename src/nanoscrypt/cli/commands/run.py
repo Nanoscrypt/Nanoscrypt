@@ -26,6 +26,16 @@ console = Console()
 class FileCompleter(Completer):
     def __init__(self, workspace_root: Path):
         self.workspace_root = workspace_root
+        self.slash_commands = [
+            "/help",
+            "/cost",
+            "/model",
+            "/profile",
+            "/memory",
+            "/clear",
+            "/history",
+            "/exit"
+        ]
         self.skip_dirs = {
             ".git",
             ".venv",
@@ -57,6 +67,31 @@ class FileCompleter(Completer):
         if not text:
             return
 
+        # 1. Autocomplete slash commands
+        if text.startswith("/"):
+            word_to_match = text.lower()
+            if word_to_match.startswith("//"):
+                double_slash_cmds = ["//TODO", "//inject", "//confluence"]
+                for cmd in double_slash_cmds:
+                    if cmd.lower().startswith(word_to_match):
+                        yield Completion(
+                            cmd,
+                            start_position=-len(text),
+                            display=cmd,
+                            display_meta="Special Command",
+                        )
+            else:
+                for cmd in self.slash_commands:
+                    if cmd.startswith(word_to_match):
+                        yield Completion(
+                            cmd,
+                            start_position=-len(text),
+                            display=cmd,
+                            display_meta="Command",
+                        )
+            return
+
+        # 2. Autocomplete files using '@'
         last_at_idx = text.rfind("@")
         if last_at_idx == -1:
             return
@@ -225,6 +260,21 @@ def run_cmd(
         )
         console.print()
 
+        # Personalized login / boot messages
+        try:
+            prof = await orchestrator.user_personal_memory.get_profile()
+            user_name = prof.get("name", os.getlogin() or "GuestDeveloper")
+        except Exception:
+            user_name = os.getlogin() or "GuestDeveloper"
+        console.print(f"[blue]•[/blue] Signed in successfully as [bold]{user_name}[/bold]!")
+
+        if hasattr(orchestrator, "mcp_manager"):
+            for s_name in orchestrator.mcp_manager.servers.keys():
+                console.print(f"[blue]•[/blue] {s_name} MCP Server: Connected")
+            if orchestrator.mcp_manager.servers:
+                console.print(f"[blue]•[/blue] MCP Servers reloaded: {len(orchestrator.mcp_manager.servers)} server connected")
+        console.print()
+
         async def execute_prompt(user_prompt: str):
             from nanoscrypt.core.harness import AgentHarness
 
@@ -275,11 +325,18 @@ def run_cmd(
 
             # Event listener for real-time progress events
             has_printed_response_header = False
+            has_printed_thought_header = False
+            import time
+            prompt_start_time = time.time()
 
             def event_listener(event):
-                nonlocal has_printed_response_header
+                nonlocal has_printed_response_header, has_printed_thought_header
                 if event.type == "thinking_delta":
-                    console.print(f"[bold green]● Planning: {event.delta}[/bold green]")
+                    if not has_printed_thought_header:
+                        elapsed = max(1, int(time.time() - prompt_start_time))
+                        console.print(f"\n[bold green]v Thought for {elapsed}s[/bold green]")
+                        has_printed_thought_header = True
+                    console.print(f"[dim italic]{event.delta}[/dim italic]")
                 elif event.type == "tool_execution_start":
                     console.print(f"\n[dim]⚒ Executing tool: [bold]{event.tool_name}[/bold]...[/dim]")
                 elif event.type == "tool_execution_end":
@@ -288,7 +345,7 @@ def run_cmd(
                     if event.error:
                         console.print(f"[red]Error: {event.error}[/red]")
                 elif event.type == "message_start":
-                    console.print("\n[bold green]RESPONSE:[/bold green]")
+                    console.print("\n[blue]•[/blue] ", end="")
                     has_printed_response_header = True
                 elif event.type == "message_delta":
                     console.print(event.delta, end="")
@@ -306,23 +363,13 @@ def run_cmd(
             if result.get("status") == "completed":
                 output_content = str(result.get("output") or result.get("response") or "")
 
-                # If the output looks like markdown or has linebreaks, render it beautifully
-                if "\n" in output_content or "#" in output_content or "`" in output_content:
-                    console.print("[bold green]RESPONSE:[/bold green]")
-                    console.print(
-                        Panel(
-                            Markdown(output_content), border_style="green", padding=(1, 2)
-                        )
-                    )
-                else:
-                    console.print(
-                        Panel(
-                            output_content,
-                            title="[bold green]Success[/bold green]",
-                            border_style="green",
-                            padding=(1, 2),
-                        )
-                    )
+                # Only print the response if it was not already streamed live
+                if not has_printed_response_header:
+                    if "\n" in output_content or "#" in output_content or "`" in output_content:
+                        console.print("[blue]•[/blue] ")
+                        console.print(Markdown(output_content))
+                    else:
+                        console.print(f"[blue]•[/blue] {output_content}")
 
                 if result.get("tool_name"):
                     console.print(
@@ -330,14 +377,15 @@ def run_cmd(
                         f"• duration: {result.get('runtime_ms')}ms[/dim]"
                     )
             elif result.get("status") == "clarification_needed":
-                console.print(
-                    Panel(
-                        str(result.get("response")),
-                        title="[bold yellow]Clarification Needed[/bold yellow]",
-                        border_style="yellow",
-                        padding=(1, 2),
+                if not has_printed_response_header:
+                    console.print(
+                        Panel(
+                            str(result.get("response")),
+                            title="[bold yellow]Clarification Needed[/bold yellow]",
+                            border_style="yellow",
+                            padding=(1, 2),
+                        )
                     )
-                )
             elif result.get("status") == "denied":
                 console.print(
                     Panel(
@@ -372,7 +420,7 @@ def run_cmd(
         def handle_slash(command_line: str) -> bool:
             cmd, _, rest = command_line.strip().partition(" ")
             cmd = cmd.lower()
-            if cmd == "/help":
+            if cmd in ("/", "/help"):
                 console.print("[bold]Available Commands:[/bold]")
                 console.print("  /help                Show this help menu")
                 console.print("  /cost                Show cumulative token and USD cost")
@@ -465,7 +513,9 @@ def run_cmd(
             elif cmd in ("/exit", "/quit"):
                 console.print("[dim]Exiting REPL session cleanly...[/dim]")
                 sys.exit(0)
-            return False
+            else:
+                console.print(f" [red]Unknown command: {cmd}. Type /help for available commands.[/red]")
+                return True
 
         # One-shot mode vs Interactive REPL mode
         if prompt:
@@ -477,13 +527,22 @@ def run_cmd(
             
             completer = FileCompleter(Path("."))
             style = Style.from_dict({
-                'prompt': 'bold #0000ff',
+                'prompt': 'bold #3498db',
+                'bottom-toolbar': 'bg:#1e272e #ffffff',
             })
+
+            def get_bottom_toolbar():
+                stats = meter.get_stats()
+                cwd_name = Path(".").resolve().name
+                model_name = settings.llm.model
+                return f"  D:\\dev\\personal\\{cwd_name}  ·  Session: {stats['cost']:.5f} AIC used  ·  Auto -> {model_name}  ·  ctrl+c exit"
+
             use_prompt_toolkit = True
             try:
                 session_prompt = PromptSession(
                     completer=completer,
-                    style=style
+                    style=style,
+                    bottom_toolbar=get_bottom_toolbar
                 )
             except Exception:
                 use_prompt_toolkit = False

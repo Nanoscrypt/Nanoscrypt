@@ -199,6 +199,24 @@ class Orchestrator:
         )
         log.info("orchestrator_task_execution_started", prompt=user_prompt)
 
+        # Check for Prefix Commands
+        from nanoscrypt.core.command_router import PrefixCommandRouter
+        cmd_type, payload = PrefixCommandRouter.parse(user_prompt)
+        if cmd_type != "normal":
+            log.info("routing_to_prefix_command_handler", command_type=cmd_type)
+            from nanoscrypt.core.command_handlers import handle_todo, handle_inject, handle_confluence
+            if cmd_type == "todo":
+                return await handle_todo(self, payload, session)
+            elif cmd_type == "inject":
+                return await handle_inject(self, payload, session)
+            elif cmd_type == "confluence":
+                return await handle_confluence(self, payload, session)
+            elif cmd_type == "invalid":
+                return {
+                    "status": "failed",
+                    "error": f"Unknown special command: '{payload}'. Available special commands: //TODO, //inject, //confluence"
+                }
+
         # Route to CodeAgentExecutor if enabled
         if settings.runtime.code_agent_enabled:
             from nanoscrypt.core.code_agent import CodeAgentExecutor
