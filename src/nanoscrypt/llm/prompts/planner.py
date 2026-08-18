@@ -28,7 +28,8 @@ Remember:
 - Ensure the agent's role, goal, and permissions are respected.
 - CRITICAL FILE PARSING RULE: If the user provides a specific file path, carefully identify its extension (e.g., .pdf, .docx, .xlsx, .csv).
 - When defining `tool_purpose`, explicitly mention the file format so the tool generator knows exactly what parsing library to use (e.g., "Parse a PDF file to...").
-- When generating a new tool for a specific binary file format, YOU MUST add the correct Python package to `dependencies_hint` (e.g., "pymupdf" for PDF, "python-docx" for DOCX, "openpyxl" for XLSX). Do not assume text parsing!
+- When generating a new tool for a specific binary file format or framework, YOU MUST add ONLY valid Python PyPI packages to `dependencies_hint` (e.g., "flask", "pymupdf", "python-docx", "openpyxl"). NEVER include front-end libraries (e.g., "bootstrap", "tailwind", "react", "vue") or invalid package names in `dependencies_hint`.
 
 Your response must strictly match the schema format requested.
 """
+

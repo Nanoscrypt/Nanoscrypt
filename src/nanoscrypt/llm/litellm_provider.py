@@ -109,7 +109,7 @@ class LiteLLMProvider(LLMProvider):
 
         # Execute completion inside the retry context
         if "timeout" not in kwargs:
-            kwargs["timeout"] = 600.0
+            kwargs["timeout"] = 1800.0
         response = await self._execute_with_retry(
             litellm.acompletion,
             model=model,
@@ -224,7 +224,7 @@ class LiteLLMProvider(LLMProvider):
             )
 
         if "timeout" not in kwargs:
-            kwargs["timeout"] = 600.0
+            kwargs["timeout"] = 1800.0
         response = await self._execute_with_retry(
             litellm.acompletion,
             model=model,
@@ -259,6 +259,27 @@ class LiteLLMProvider(LLMProvider):
             self.last_cost = 0.0
 
         raw_content = response.choices[0].message.content or ""
+        if not raw_content and issubclass(response_model, BaseModel):
+            # Fallback: prompt for JSON without response_format if model returns empty response
+            json_prompt = f"{prompt}\n\nIMPORTANT: Respond with ONLY a valid JSON object matching schema: {response_model.model_json_schema()}"
+            raw_content = await self.generate(
+                prompt=json_prompt,
+                system_prompt=system_prompt,
+                model=model,
+                temperature=temp,
+                max_tokens=tokens,
+                **kwargs
+            )
+            # Clean markdown code blocks if present
+            raw_content = raw_content.strip()
+            if raw_content.startswith("```"):
+                lines = raw_content.splitlines()
+                if len(lines) >= 2 and lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                raw_content = "\n".join(lines).strip()
+
         logger.info("llm_raw_structured_response", raw_content=raw_content)
         if issubclass(response_model, BaseModel):
             return response_model.model_validate_json(raw_content)

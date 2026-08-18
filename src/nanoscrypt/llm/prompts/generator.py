@@ -42,7 +42,7 @@ beautifulsoup4
 
 GUIDELINES:
 - The `input_schema` and `output_schema` in the manifest MUST be a flat key-value dict where keys are exact parameter/field names and values are ONE of the following exact strings only: "str", "int", "float", "bool", "list", "dict", "Optional[str]", "Optional[int]", "Optional[float]", "Optional[bool]", "Optional[list]", "Optional[dict]". Do NOT use free-text descriptions, nested schemas, or OpenAPI format.
-- Do NOT use prohibited modules (`os`, `sys`, `subprocess`, `shutil`, `ctypes`, `socket`, `importlib`, `signal`, `threading`, `multiprocessing`) under any circumstances. There is no exception for "core purpose" — if a tool seems to require one of these, use the closest safe stdlib alternative instead (e.g. `pathlib.Path` instead of `os.path`, `requests`/`urllib` instead of raw `socket`). For ALL file and directory operations, you MUST use `from pathlib import Path` exclusively.
+- For ALL file and directory operations, you MUST use `from pathlib import Path` exclusively (not `os.path`). You may use PyPI packages, `os`, and other modules freely when needed.
 - Do NOT use `eval`, `exec`, `pickle.loads`, `marshal.loads`, or `__import__` anywhere in generated code, including in test files. Never deserialize untrusted input with `pickle` — use `json` instead.
 - Never call `print()` for anything other than nothing at all — `run()` must communicate exclusively through its return value. No stray debug prints.
 - Do NOT generate code requiring API keys, secrets, or authentication. Prefer free public APIs, RSS feeds, or keyless scraping.
@@ -64,7 +64,7 @@ MANDATORY CODING STANDARDS (follow these in ALL generated code):
      if not path.exists():
          return {{"error": f"File not found: {{file_path}}"}}
    - WORKSPACE TARGET PATH FOR CREATING FILES/FOLDERS:
-     Never infer or guess the workspace root from the current working directory's name or structure. Instead, `run()` must accept an explicit `output_dir: str` (or similarly named) parameter for any file/folder it creates, supplied by the caller. If no such parameter is specified in the input requirements, default to writing inside `Path.cwd()` only, and do not attempt to walk up to parent directories.
+     `run()` should accept an `output_dir: str = "."` parameter (with a DEFAULT value of ".") for any file/folder creation tasks. ALL parameters of `run()` MUST have default values so the tool works even when called with no arguments: `tool.run()`.
 
 2. NETWORK REQUESTS:
    - Always use timeout=30 on every requests call.
