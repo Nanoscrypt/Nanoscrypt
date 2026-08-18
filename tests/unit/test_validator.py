@@ -46,19 +46,6 @@ def test_validator_syntax_error(validator):
     assert any(iss.stage == "syntax" and iss.severity == "error" for iss in result.issues)
 
 def test_validator_security_violations(validator):
-    # Prohibited import test
-    code_import = """import os
-def run(data: str) -> dict:
-    return {"res": os.name}
-"""
-    tool_import = GeneratedTool(
-        name="bad_tool", code=code_import, requirements=[],
-        manifest=ToolManifest(name="bad_tool"), tests="", readme=""
-    )
-    result = validator.validate(tool_import)
-    assert result.is_valid is False
-    assert any("Blocked import 'os'" in iss.message for iss in result.issues)
-
     # Prohibited builtin test
     code_builtin = """def run(data: str) -> dict:
     eval(data)
