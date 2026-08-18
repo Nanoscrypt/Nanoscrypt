@@ -20,11 +20,12 @@ class LLMSettings(BaseModel):
 
 
 class RuntimeSettings(BaseModel):
-    timeout_seconds: int = 30
+    timeout_seconds: int = 90
     max_memory_mb: int = 512
     cleanup_after: bool = True
     workspace_root: str = "./workspaces"
     venv_cache_dir: str = "./venv_cache"  # For caching virtual environments
+    use_venv: bool = False  # Set to False to run directly with sys.executable (no isolated venv)
     capsem_enabled: bool = False
     code_agent_enabled: bool = False
 
