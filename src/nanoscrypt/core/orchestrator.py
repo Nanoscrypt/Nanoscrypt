@@ -347,15 +347,26 @@ class Orchestrator:
             "describe",
             "analyze",
             "overview",
-            "show",
             "tell me",
         ]
+        action_keywords = [
+            "build",
+            "create",
+            "generate",
+            "make",
+            "develop",
+            "implement",
+            "write",
+            "delete",
+            "mkdir",
+            "remove",
+            "run",
+        ]
         prompt_lower = user_prompt.lower()
+        has_action_intent = any(kw in prompt_lower for kw in action_keywords)
         is_explain_query = (
-            (any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt)
-            and not any(
-                kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "]
-            )
+            (any(kw in prompt_lower for kw in explain_keywords) or ("@" in user_prompt and not has_action_intent))
+            and not has_action_intent
         )
 
         if direct_tool_name:
@@ -445,7 +456,7 @@ class Orchestrator:
 
                 try:
                     resp_val = await self.planner.llm.generate(
-                        prompt=clean_prompt, system_prompt=system_prompt, timeout=600.0
+                        prompt=clean_prompt, system_prompt=system_prompt, timeout=1800.0
                     )
                 except Exception as e:
                     # Provide local fallback if LLM generation times out or fails
@@ -471,6 +482,7 @@ class Orchestrator:
                 "status": "completed",
                 "action_taken": "direct_response",
                 "response": resp_val,
+                "reasoning": decision.reasoning,
             }
 
         if decision.action == "clarify":
@@ -1002,4 +1014,6 @@ class Orchestrator:
             "output": output_data,
             "error": error_msg,
             "runtime_ms": exec_res.runtime_ms,
+            "reasoning": getattr(decision, "reasoning", None),
+            "response": getattr(decision, "response", None),
         }

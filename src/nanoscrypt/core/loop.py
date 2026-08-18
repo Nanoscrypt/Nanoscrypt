@@ -38,6 +38,13 @@ async def run_agent_loop(
     )
     if harness is not None:
         harness.last_result = result
+
+    # Emit LLM reasoning / thinking details
+    reasoning = result.get("reasoning")
+    if reasoning:
+        yield ThinkingDeltaEvent(delta=f"\n[Reasoning]: {reasoning}")
+    elif result.get("response"):
+        yield ThinkingDeltaEvent(delta=f"\n[Planning]: {result.get('response')}")
     
     if result.get("action_taken") == "execute_tool":
         yield ToolExecutionStartEvent(

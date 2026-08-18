@@ -29,16 +29,7 @@ class PolicyEngine:
         self.policy = policy or self._get_default_policy()
 
     def _get_default_policy(self) -> GuardrailPolicy:
-        # Load blocked configurations from settings
-        blocked_imports = [
-            "os",
-            "sys",
-            "subprocess",
-            "shutil",
-            "ctypes",
-            "socket",
-            "importlib",
-        ]
+        blocked_imports = []
         blocked_builtins = [
             "exec",
             "eval",

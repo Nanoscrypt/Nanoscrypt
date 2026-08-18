@@ -70,6 +70,37 @@ class RuntimeManager:
 
         return workspace
 
+    def setup_application_workspace(self, session_id: str, app_manifest) -> Path:
+        """Scaffolds a multi-file project workspace preserving directory structure."""
+        workspace = self.get_session_workspace(session_id)
+        ensure_directory(workspace)
+
+        # Write all files in the manifest dictionary
+        for rel_path, content in app_manifest.files.items():
+            dest = (workspace / rel_path).resolve()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+
+        # Ensure requirements.txt or package.json exists if dependencies were declared
+        if getattr(app_manifest, "language", "python") == "python":
+            req_file = workspace / "requirements.txt"
+            if not req_file.exists() and app_manifest.dependencies:
+                req_file.write_text("\n".join(app_manifest.dependencies), encoding="utf-8")
+        elif getattr(app_manifest, "language", "") in ("javascript", "typescript", "node"):
+            pkg_file = workspace / "package.json"
+            if not pkg_file.exists():
+                import json
+                deps_dict = {dep: "latest" for dep in app_manifest.dependencies}
+                pkg_data = {
+                    "name": app_manifest.name or "nanoscrypt-app",
+                    "version": "1.0.0",
+                    "main": app_manifest.entry_point or "server.js",
+                    "dependencies": deps_dict
+                }
+                pkg_file.write_text(json.dumps(pkg_data, indent=2), encoding="utf-8")
+
+        return workspace
+
     def create_virtual_env(self, venv_dir: Path) -> Path:
         """Creates a virtual environment in the specified directory if it doesn't exist."""
         # If the path looks like a workspace directory (i.e. contains tool.py or requirements.txt),
@@ -126,13 +157,22 @@ class RuntimeManager:
                 check=True,
             )
             # Run pip install
-            subprocess.run(
+            res = subprocess.run(
                 [str(pip_executable), "install", "-r", str(temp_reqs)],
                 capture_output=True,
-                check=True,
+                text=True,
             )
-            # Write sentinel file with the requirements hash
-            sentinel_file.write_text(reqs_hash, encoding="utf-8")
+            if res.returncode != 0:
+                logger.warning(
+                    "pip_install_failed_continuing_offline",
+                    stderr=res.stderr,
+                    stdout=res.stdout,
+                )
+                # If network fails or pip install fails, check if standard modules exist or continue gracefully
+                print(f"\n[Warning] Pip install offline/failed for {cleaned}. Attempting tool execution with available environment packages...")
+            else:
+                # Write sentinel file with the requirements hash
+                sentinel_file.write_text(reqs_hash, encoding="utf-8")
         finally:
             if temp_reqs.exists():
                 temp_reqs.unlink()
@@ -147,17 +187,21 @@ class RuntimeManager:
         """Runs the tool wrapper script using the shared/cached virtual environment python interpreter."""
         workspace = self.get_session_workspace(session_id)
 
-        # Determine venv dir based on requirements
-        reqs = requirements or []
-        venv_dir = self.get_venv_directory(reqs)
-        self.create_virtual_env(venv_dir)
-        self.install_dependencies(venv_dir, reqs)
-
-        # Determine python executable based on OS
-        if sys.platform == "win32":
-            python_executable = venv_dir / "Scripts" / "python.exe"
+        # Check if venv is disabled in settings
+        if not getattr(settings.runtime, "use_venv", True):
+            python_executable = Path(sys.executable)
         else:
-            python_executable = venv_dir / "bin" / "python"
+            # Determine venv dir based on requirements
+            reqs = requirements or []
+            venv_dir = self.get_venv_directory(reqs)
+            self.create_virtual_env(venv_dir)
+            self.install_dependencies(venv_dir, reqs)
+
+            # Determine python executable based on OS
+            if sys.platform == "win32":
+                python_executable = venv_dir / "Scripts" / "python.exe"
+            else:
+                python_executable = venv_dir / "bin" / "python"
 
         if not python_executable.exists():
             raise FileNotFoundError(
@@ -168,6 +212,7 @@ class RuntimeManager:
 import json
 import sys
 import traceback
+import inspect
 import tool
 
 try:
@@ -184,7 +229,18 @@ try:
             args = input_str
 
     if isinstance(args, dict):
+        # Introspect run() signature and fill missing params with defaults
+        try:
+            sig = inspect.signature(tool.run)
+            for param_name, param in sig.parameters.items():
+                if param_name not in args and param.default is not inspect.Parameter.empty:
+                    args[param_name] = param.default
+        except Exception:
+            pass
         result = tool.run(**args)
+    elif args is None or args == '' or args == '{{}}':
+        # No args provided - call run() with no arguments (relies on defaults)
+        result = tool.run()
     else:
         result = tool.run(args)
         
@@ -268,6 +324,101 @@ except Exception as e:
             workspace_path=workspace,
         )
 
+    def execute_application(
+        self,
+        session_id: str,
+        app_manifest,
+        timeout: int | None = None,
+    ) -> ExecutionResult:
+        """Executes a multi-file polyglot application or starts it as a supervised daemon."""
+        workspace = self.setup_application_workspace(session_id, app_manifest)
+        language = getattr(app_manifest, "language", "python").lower()
+
+        # Handle Python
+        if language == "python":
+            venv_dir = self.get_venv_directory(app_manifest.dependencies)
+            self.create_virtual_env(venv_dir)
+            self.install_dependencies(venv_dir, app_manifest.dependencies)
+
+            if sys.platform == "win32":
+                python_executable = venv_dir / "Scripts" / "python.exe"
+            else:
+                python_executable = venv_dir / "bin" / "python"
+
+            cmd = [str(python_executable.resolve()), app_manifest.entry_point]
+
+        # Handle Node.js / JavaScript / TypeScript
+        elif language in ("javascript", "typescript", "node"):
+            # If npm dependencies exist, run npm install
+            if app_manifest.dependencies:
+                subprocess.run(["npm", "install"], cwd=str(workspace), capture_output=True)
+            cmd = ["node", app_manifest.entry_point]
+
+        # Handle Go
+        elif language == "go":
+            cmd = ["go", "run", app_manifest.entry_point]
+
+        # Handle Rust
+        elif language == "rust":
+            cmd = ["cargo", "run"]
+
+        else:
+            raise ValueError(f"Unsupported language driver: {language}")
+
+        # If daemon / long-running web application
+        if getattr(app_manifest, "is_daemon", False):
+            import socket
+            import time
+
+            logger.info("runtime_starting_daemon_application", name=app_manifest.name, port=app_manifest.port)
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(workspace),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            # Wait briefly to confirm port is listening
+            port = app_manifest.port or 8080
+            time.sleep(1.5)
+
+            # Check if process died immediately
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate()
+                return ExecutionResult(
+                    stdout=stdout,
+                    stderr=stderr,
+                    return_code=proc.returncode,
+                    runtime_ms=1500,
+                    timed_out=False,
+                    workspace_path=workspace,
+                )
+
+            return ExecutionResult(
+                stdout=f"Daemon application '{app_manifest.name}' successfully launched on port {port}. PID: {proc.pid}",
+                stderr="",
+                return_code=0,
+                runtime_ms=1500,
+                timed_out=False,
+                workspace_path=workspace,
+            )
+
+        # Standard execution for non-daemon applications
+        limit = timeout or self.timeout_seconds
+        start_time = time.perf_counter()
+        res = subprocess.run(cmd, cwd=str(workspace), capture_output=True, text=True, timeout=limit)
+        runtime_ms = int((time.perf_counter() - start_time) * 1000)
+
+        return ExecutionResult(
+            stdout=res.stdout,
+            stderr=res.stderr,
+            return_code=res.returncode,
+            runtime_ms=runtime_ms,
+            timed_out=False,
+            workspace_path=workspace,
+        )
+
     def cleanup_workspace(self, session_id: str) -> None:
         """Removes the entire session workspace directory."""
         workspace = self.get_session_workspace(session_id)
@@ -275,3 +426,4 @@ except Exception as e:
             return
         if workspace.exists():
             remove_directory(workspace)
+

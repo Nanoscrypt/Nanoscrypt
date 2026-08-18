@@ -198,7 +198,7 @@ async def handle_confluence(orchestrator: Any, payload: str, session: Session) -
         doc = await orchestrator.planner.llm.generate(
             prompt=prompt,
             system_prompt="You are a professional technical documentation writer.",
-            timeout=600.0
+            timeout=1800.0
         )
     except Exception as e:
         return {"status": "failed", "error": f"LLM documentation generation failed: {e}"}

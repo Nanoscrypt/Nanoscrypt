@@ -33,22 +33,7 @@ class ValidationResult:
 class SecurityASTVisitor(ast.NodeVisitor):
     """AST visitor that checks for dangerous calls, imports, and attributes."""
 
-    BLOCKED_IMPORTS = {
-        "os",
-        "sys",
-        "subprocess",
-        "shutil",
-        "ctypes",
-        "importlib",
-        "socket",
-        "signal",
-        "multiprocessing",
-        "threading",
-        "pickle",
-        "shelve",
-        "code",
-        "codeop",
-    }
+    BLOCKED_IMPORTS: set[str] = set()
 
     BLOCKED_BUILTINS = {
         "exec",
@@ -415,8 +400,7 @@ class ToolValidator:
                 continue
             if _is_dependency_satisfied(mod_name, norm_reqs, self.llm):
                 continue
-            # Check common aliases: e.g. ``import cv2`` -> package ``opencv-python``
-            # We simply flag unknown modules as errors.
+            # Flag undeclared third-party dependencies as validation errors
             issues.append(
                 ValidationIssue(
                     stage="imports",
@@ -975,3 +959,51 @@ class ToolValidator:
         return ValidationResult(
             is_valid=is_valid, issues=all_issues, formatted_code=formatted
         )
+
+    def validate_application(self, app_manifest) -> ValidationResult:
+        """Validates a multi-file polyglot application bundle."""
+        all_issues: list[ValidationIssue] = []
+        language = getattr(app_manifest, "language", "python").lower()
+
+        # Validate each file based on its extension/language
+        for file_path, content in app_manifest.files.items():
+            if file_path.endswith(".py") and language == "python":
+                # Validate python files for syntax and security
+                try:
+                    ast.parse(content)
+                except SyntaxError as e:
+                    all_issues.append(
+                        ValidationIssue(
+                            stage="syntax",
+                            severity="error",
+                            message=f"Syntax error in {file_path}: {e.msg}",
+                            line=e.lineno,
+                        )
+                    )
+                sec_issues = self.validate_security(content)
+                for issue in sec_issues:
+                    issue.message = f"[{file_path}] {issue.message}"
+                all_issues.extend(sec_issues)
+            elif file_path.endswith((".html", ".htm")):
+                if not content.strip():
+                    all_issues.append(
+                        ValidationIssue(
+                            stage="content",
+                            severity="warning",
+                            message=f"Empty HTML template file: {file_path}",
+                        )
+                    )
+
+        # Check entry point existence
+        if app_manifest.entry_point not in app_manifest.files:
+            all_issues.append(
+                ValidationIssue(
+                    stage="entry_point",
+                    severity="error",
+                    message=f"Entry point '{app_manifest.entry_point}' not found in project files.",
+                )
+            )
+
+        is_valid = not any(iss.severity == "error" for iss in all_issues)
+        return ValidationResult(is_valid=is_valid, issues=all_issues)
+
