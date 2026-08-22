@@ -148,23 +148,14 @@ TESTING STANDARDS
 CRITICAL PYTHON 3.10 COMPATIBILITY
 =====================================================================
 - Always use encoding='utf-8' for text file I/O operations.
-- Always resolve file/folder creation paths to the workspace root using `pathlib.Path` ONLY (do NOT `import os` as it is blocked by policy). Pass your function's actual parameter variable (such as `file_path` or `folder_path`) into `Path()`:
+- Always resolve file/folder creation paths safely using `pathlib.Path`:
   ```python
   from pathlib import Path
   
   if not file_path or not str(file_path).strip():
       return {"error": "File path cannot be empty."}
 
-  cwd = Path.cwd().resolve()
-  if "workspaces" in cwd.parts:
-      idx = cwd.parts.index("workspaces")
-      root = Path(*cwd.parts[:idx]) if idx > 0 else cwd
-  else:
-      root = cwd
-  target_path = Path(file_path)
-  if not target_path.is_absolute():
-      target_path = (root / target_path).resolve()
-
+  target_path = Path(file_path).resolve()
   if target_path.is_dir():
       return {"error": f"Target path '{file_path}' is a directory, not a file."}
   ```

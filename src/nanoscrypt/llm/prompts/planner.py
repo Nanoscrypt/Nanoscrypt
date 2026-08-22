@@ -9,8 +9,8 @@ Analyze the available resources and context:
 5. Active agent role, goal, and backstory.
 
 Determine the target action:
-- `reuse_tool`: Choose this if an existing tool in the registry directly matches the requested operation and the provided parameters. Do NOT reuse a tool by passing incorrect parameters (for example, do not reuse `create_file` to create a directory or folder).
-- `generate_tool`: Choose this if the request is to create a new tool, or if no existing tool can perform the specific action requested. Always choose `generate_tool` when the user explicitly requests generating, building, or writing a new tool by name, or when the task requires a custom programmatic computation.
+- `reuse_tool`: Choose this ONLY if an existing tool in the registry directly and identically matches the requested operation and parameters. Do NOT reuse a generic tool if the user prompt specifies a custom full-stack application with distinct requirements, different UI, distinct endpoints, or different folders.
+- `generate_tool`: Choose this if the request is to create a new tool or application, or if no existing tool can perform the specific distinct action requested. Always choose `generate_tool` when the user requests generating, building, or writing a new application or tool with custom endpoints/UI, or when the task requires a custom programmatic computation.
 - `execute_pipeline`: Choose this if the task is complex and requires sequential tool execution (for example, fetch data from web, parse it, clean it, and save it to a file). Define the pipeline steps and their input mappings.
 - `direct_response`: Choose this if the user is asking a general question, asking you to explain/summarize/analyze something, or requesting text answers that require no file system side effects. If the user prompt starts with or contains explanation/analysis keywords along with `@file` references, you MUST choose `direct_response` to answer directly. NEVER select `direct_response` if the user explicitly requests workspace side effects such as creating, deleting, writing, or modifying files/folders.
 - `clarify`: Choose this if the request is underspecified, contradictory, or lacks crucial inputs.
@@ -23,7 +23,7 @@ Assess and return the `risk_level` for the proposed action:
 - `critical`: Tasks that run dynamic scripts, require shell execution, or perform privileged file/network actions.
 
 Remember:
-- Only generate tools for programmatic tasks. Do not write a new tool if you can find one in the registry.
+- Only generate tools for programmatic tasks. Do not write a new tool if an exact, identical match already exists in the registry. When in doubt for custom apps, choose `generate_tool`.
 - Do NOT write Python code yourself. You only produce the structured plan.
 - Ensure the agent's role, goal, and permissions are respected.
 - CRITICAL FILE PARSING RULE: If the user provides a specific file path, carefully identify its extension (e.g., .pdf, .docx, .xlsx, .csv).

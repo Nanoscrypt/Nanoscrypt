@@ -110,6 +110,11 @@ class LiteLLMProvider(LLMProvider):
         # Execute completion inside the retry context
         if "timeout" not in kwargs:
             kwargs["timeout"] = 1800.0
+        if "api_key" not in kwargs and getattr(settings.llm, "api_key", None):
+            kwargs["api_key"] = settings.llm.api_key
+        if "api_base" not in kwargs and getattr(settings.llm, "api_base", None):
+            kwargs["api_base"] = settings.llm.api_base
+
         response = await self._execute_with_retry(
             litellm.acompletion,
             model=model,

@@ -97,52 +97,59 @@ MANDATORY CODING STANDARDS (follow these in ALL generated code):
 8. OUTPUT:
    - Return values must be JSON-serializable (str, int, float, bool, list, dict, None only).
 
-COMMON LIBRARY PATTERNS (use these exact patterns when applicable):
-
-PDF text extraction:
-  import fitz
-  doc = fitz.open(str(pdf_path))
-  text = ""
-  for page in doc:
-      text += page.get_text()
-  doc.close()
-  Requirements: PyMuPDF
-
-HTTP GET:
-  import requests
-  headers = {{"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}}
-  response = requests.get(url, timeout=30, headers=headers)
-  response.raise_for_status()
-  data = response.text
-  Requirements: requests
-
-HTML parsing (Standard Library):
-  from html.parser import HTMLParser
-  # Extend html.parser.HTMLParser for zero-dependency parsing.
-
-HTML parsing (BeautifulSoup):
-  from bs4 import BeautifulSoup
-  soup = BeautifulSoup(html, "html.parser")
-  Requirements: beautifulsoup4
-
-Safe file reading:
-  from pathlib import Path
-  path = Path(file_path)
-  if not path.exists():
-      return {{"error": f"File not found: {{file_path}}"}}
-  content = path.read_text(encoding="utf-8")
-
-Mocking network calls in tests:
-  from unittest.mock import patch, MagicMock
-  @patch("tool.requests.get")
-  def test_fetch_success(mock_get):
-      mock_response = MagicMock()
-      mock_response.text = "<html>...</html>"
-      mock_response.raise_for_status.return_value = None
-      mock_get.return_value = mock_response
-      result = run(url="https://example.com")
-      assert "error" not in result
-"""
+100: FULL-STACK WEB APPLICATION STANDARDS (FastAPI / Web UIs / SQLite):
+101:    - Self-Contained Frontend: ALWAYS serve the HTML/CSS/JS frontend directly using `HTMLResponse` on `GET /` or embed it cleanly in `tool.py`.
+102:    - Safe Static Directories: If mounting `StaticFiles(directory='static')`, you MUST execute `from pathlib import Path; Path('static').mkdir(parents=True, exist_ok=True)` before `app.mount(...)` to prevent Starlette runtime crashes.
+103:    - Self-Contained Routes: All endpoints (`@app.get`, `@app.post`, etc.) must be defined on the main `app` instance or in explicitly instantiated APIRouters (`api_router = APIRouter()`). Never reference `api_router` without creating it.
+104:    - Database Initialization: For SQLite, always create tables in an `@app.on_event("startup")` handler using `CREATE TABLE IF NOT EXISTS`.
+105:    - Port Config: The `run(port: int = 8080)` function must launch `uvicorn.run(app, host="127.0.0.1", port=port)`.
+106: 
+107: COMMON LIBRARY PATTERNS (use these exact patterns when applicable):
+108: 
+109: PDF text extraction:
+110:   import fitz
+111:   doc = fitz.open(str(pdf_path))
+112:   text = ""
+113:   for page in doc:
+114:       text += page.get_text()
+115:   doc.close()
+116:   Requirements: PyMuPDF
+117: 
+118: HTTP GET:
+119:   import requests
+120:   headers = {{"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}}
+121:   response = requests.get(url, timeout=30, headers=headers)
+122:   response.raise_for_status()
+123:   data = response.text
+124:   Requirements: requests
+125: 
+126: HTML parsing (Standard Library):
+127:   from html.parser import HTMLParser
+128:   # Extend html.parser.HTMLParser for zero-dependency parsing.
+129: 
+130: HTML parsing (BeautifulSoup):
+131:   from bs4 import BeautifulSoup
+132:   soup = BeautifulSoup(html, "html.parser")
+133:   Requirements: beautifulsoup4
+134: 
+135: Safe file reading:
+136:   from pathlib import Path
+137:   path = Path(file_path)
+138:   if not path.exists():
+139:       return {{"error": f"File not found: {{file_path}}"}}
+140:   content = path.read_text(encoding="utf-8")
+141: 
+142: Mocking network calls in tests:
+143:   from unittest.mock import patch, MagicMock
+144:   @patch("tool.requests.get")
+145:   def test_fetch_success(mock_get):
+146:       mock_response = MagicMock()
+147:       mock_response.text = "<html>...</html>"
+148:       mock_response.raise_for_status.return_value = None
+149:       mock_get.return_value = mock_response
+150:       result = run(url="https://example.com")
+151:       assert "error" not in result
+152: """
 
 TOOL_GENERATION_USER_TEMPLATE = """Generate a tool package for:
 Name: {tool_name}
