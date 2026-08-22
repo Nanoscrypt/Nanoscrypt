@@ -159,11 +159,45 @@ def _normalize_package_name(name: str) -> str:
     return re.sub(r"[-_]+", "_", name).lower()
 
 
+# Known import-module to pip-package mappings for rapid zero-latency lookup
+KNOWN_PACKAGE_MAPPINGS = {
+    "fitz": {"pymupdf"},
+    "pil": {"pillow"},
+    "bs4": {"beautifulsoup4"},
+    "cv2": {"opencv_python", "opencv_python_headless"},
+    "yaml": {"pyyaml"},
+    "docx": {"python_docx"},
+    "pptx": {"python_pptx"},
+    "dotenv": {"python_dotenv"},
+    "sklearn": {"scikit_learn"},
+    "serial": {"pyserial"},
+    "jwt": {"pyjwt"},
+    "starlette": {"fastapi", "starlette"},
+    "pydantic_core": {"pydantic"},
+    "git": {"gitpython"},
+    "magic": {"python_magic", "python_magic_bin"},
+    "openpyxl": {"openpyxl"},
+    "aiosqlite": {"aiosqlite"},
+    "uvicorn": {"uvicorn"},
+    "fastapi": {"fastapi"},
+    "requests": {"requests"},
+    "httpx": {"httpx"},
+    "aiohttp": {"aiohttp"},
+    "pydantic": {"pydantic"},
+    "pytest": {"pytest"},
+}
+
+
 def _is_dependency_satisfied(mod_name: str, norm_reqs: set[str], llm=None) -> bool:
     """Checks if an import module name is satisfied by the list of normalized requirements."""
     norm_mod = _normalize_package_name(mod_name)
     if norm_mod in norm_reqs:
         return True
+
+    # Check known static mappings first (Zero-latency)
+    if norm_mod in KNOWN_PACKAGE_MAPPINGS:
+        if any(pkg in norm_reqs for pkg in KNOWN_PACKAGE_MAPPINGS[norm_mod]):
+            return True
     
     # Check mappings dynamically using LLM knowledge if available
     if llm:
@@ -178,7 +212,7 @@ def _is_dependency_satisfied(mod_name: str, norm_reqs: set[str], llm=None) -> bo
                 f"Respond ONLY with 'yes' or 'no' (no markdown, no punctuation)."
             )
             try:
-                res = await llm.generate(prompt=prompt, temperature=0.0)
+                res = await llm.generate(prompt=prompt, temperature=0.0, timeout=10.0)
                 return res.strip().lower() == "yes"
             except Exception:
                 return False
@@ -852,11 +886,14 @@ class ToolValidator:
                     try:
                         ruff_diagnostics = json.loads(result.stdout)
                         for d in ruff_diagnostics:
+                            code_id = d.get("code", "")
+                            # F821 is undefined name - critical error that causes NameError runtime crash
+                            sev = "error" if code_id == "F821" else "warning"
                             issues.append(
                                 ValidationIssue(
                                     stage="lint",
-                                    severity="warning",
-                                    message=f"[{d.get('code')}] {d.get('message')}",
+                                    severity=sev,
+                                    message=f"[{code_id}] {d.get('message')}",
                                     line=d.get("location", {}).get("row"),
                                 )
                             )

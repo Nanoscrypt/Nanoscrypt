@@ -126,6 +126,19 @@ def classify_error(stderr: str, timed_out: bool, user_prompt: str = "") -> tuple
             "responses, or HTML error pages returned instead of JSON. Wrap "
             "json.loads() in try/except json.JSONDecodeError."
         )
+    elif "nameerror" in stderr or "is not defined" in err_lower:
+        return "name_error", (
+            "A variable, function, router, or class is referenced before being defined or imported. "
+            "Inspect the code: (1) Ensure all variables (e.g. 'api_router = APIRouter()') are explicitly "
+            "instantiated, (2) Ensure all required third-party/stdlib modules are imported at top of file, "
+            "(3) Verify there are no typos in variable or function names."
+        )
+    elif "staticfiles" in err_lower or "directory 'static' does not exist" in err_lower:
+        return "staticfiles_error", (
+            "A Starlette/FastAPI StaticFiles mounting error occurred because the target folder does not exist. "
+            "Fix this by either: (1) creating the directory first with `from pathlib import Path; Path('static').mkdir(parents=True, exist_ok=True)` "
+            "before calling `app.mount(...)`, or (2) serving the single-page HTML UI directly from `GET /` using `HTMLResponse`."
+        )
     elif "runtimeerror" in stderr:
         return "runtime_error", (
             "A generic runtime error occurred. Review the full traceback for the specific "
@@ -326,8 +339,9 @@ class RepairLoop:
                 # 6. Post-Repair Validation Gate (validate BEFORE running tests)
                 val_res = self.validator.validate(patched_tool)
                 if not val_res.is_valid:
-                    log.warning("repair_validation_failed", attempt=attempt)
-                    validation_errors = "\n".join([iss.message for iss in val_res.issues])
+                    error_msgs = [f"[{iss.stage}] {iss.message}" for iss in val_res.issues if iss.severity == "error"]
+                    log.warning("repair_validation_failed", attempt=attempt, validation_errors=error_msgs)
+                    validation_errors = "\n".join([f"[{iss.stage}] {iss.message}" for iss in val_res.issues])
 
                     # Record this failed attempt in history
                     attempt_history.append({

@@ -1,5 +1,6 @@
 import ast
 import re
+import sys
 from copy import deepcopy
 
 import structlog
@@ -236,6 +237,128 @@ def fix_pathlib_usage(code: str) -> tuple[str, bool]:
     return "\n".join(lines), True
 
 
+def fix_common_missing_imports(code: str) -> tuple[str, int]:
+    """Automatically injects missing common imports (e.g. typing.Optional, datetime, shutil)
+    if referenced in code but not imported, resolving F821 undefined variable errors."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code, 0
+
+    all_names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    
+    # Check what is already imported or defined
+    imported_or_defined = set(dir(__builtins__))
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            imported_or_defined.add(node.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                imported_or_defined.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                imported_or_defined.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    imported_or_defined.add(target.id)
+
+    missing = all_names - imported_or_defined
+    injections = []
+
+    # Check typing symbols
+    typing_symbols = {"Optional", "Union", "List", "Dict", "Set", "Tuple", "Any", "Callable"}
+    needed_typing = [s for s in typing_symbols if s in missing]
+    if needed_typing:
+        injections.append(f"from typing import {', '.join(sorted(needed_typing))}")
+
+    # Check datetime
+    if "datetime" in missing:
+        injections.append("from datetime import datetime")
+
+    # Check shutil
+    if "shutil" in missing:
+        injections.append("import shutil")
+
+    # Check json
+    if "json" in missing:
+        injections.append("import json")
+
+    # Check os
+    if "os" in missing:
+        injections.append("import os")
+
+    # Check sys
+    if "sys" in missing:
+        injections.append("import sys")
+
+    if not injections:
+        return code, 0
+
+    # Insert at top of code
+    lines = code.split("\n")
+    insert_idx = 0
+    in_docstring = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if i == 0 and (stripped.startswith('"""') or stripped.startswith("'''")):
+            if stripped.count('"""') >= 2 or stripped.count("'''") >= 2:
+                insert_idx = i + 1
+                continue
+            in_docstring = True
+            continue
+        if in_docstring:
+            if '"""' in stripped or "'''" in stripped:
+                in_docstring = False
+                insert_idx = i + 1
+            continue
+        if stripped.startswith("import ") or stripped.startswith("from "):
+            insert_idx = i + 1
+        elif stripped and not stripped.startswith("#"):
+            break
+
+    lines[insert_idx:insert_idx] = injections
+    return "\n".join(lines), len(injections)
+
+
+def fix_staticfiles_directory(code: str) -> tuple[str, bool]:
+    """Ensures that any directory passed to StaticFiles(directory=...) is automatically created
+    with Path(...).mkdir(parents=True, exist_ok=True) before StaticFiles is initialized,
+    preventing Starlette runtime DirectoryDoesNotExist crashes."""
+    if "StaticFiles" not in code:
+        return code, False
+
+    # Match StaticFiles(directory="...") or StaticFiles(directory='...')
+    pattern = re.compile(r'StaticFiles\s*\(\s*directory\s*=\s*["\']([^"\']+)["\']', re.DOTALL)
+    matches = pattern.findall(code)
+    if not matches:
+        return code, False
+
+    lines = code.split("\n")
+    # Find insertion point before the first StaticFiles usage or app.mount
+    insert_idx = 0
+    for i, line in enumerate(lines):
+        if "StaticFiles" in line or "app.mount" in line:
+            insert_idx = i
+            break
+
+    mkdir_statements = []
+    # Ensure Path is available
+    if not re.search(r'(?:from\s+pathlib\s+import|import\s+pathlib)', code):
+        mkdir_statements.append("from pathlib import Path")
+
+    for dir_path in set(matches):
+        statement = f'from pathlib import Path; Path("{dir_path}").mkdir(parents=True, exist_ok=True)'
+        if statement not in code:
+            mkdir_statements.append(statement)
+
+    if not mkdir_statements:
+        return code, False
+
+    lines[insert_idx:insert_idx] = mkdir_statements
+    return "\n".join(lines), True
+
+
 def normalize_requirements(requirements: list[str]) -> tuple[list[str], int]:
     """Clean up a requirements list: strip whitespace, remove empty lines,
     and filter out stdlib modules that were accidentally included.
@@ -398,6 +521,22 @@ class CodePostProcessor:
             except Exception as e:
                 log.warning("postprocessor_pathlib_fix_failed", error=str(e))
 
+            # 3b. Fix StaticFiles directory existence (prevents Starlette crash)
+            try:
+                code, static_fixed = fix_staticfiles_directory(code)
+                if static_fixed:
+                    fixes_summary["staticfiles_directory_created"] = True
+            except Exception as e:
+                log.warning("postprocessor_staticfiles_fix_failed", error=str(e))
+
+            # 3c. Fix common missing standard imports (Optional, datetime, shutil) to prevent F821
+            try:
+                code, imports_fixed = fix_common_missing_imports(code)
+                if imports_fixed:
+                    fixes_summary["common_imports_injected"] = imports_fixed
+            except Exception as e:
+                log.warning("postprocessor_common_imports_fix_failed", error=str(e))
+
             # 4. Normalize requirements
             try:
                 requirements, req_removed = normalize_requirements(requirements)
@@ -423,15 +562,57 @@ class CodePostProcessor:
             except Exception as e:
                 log.warning("postprocessor_test_import_fix_failed", error=str(e))
 
+            # 6. Auto-synchronize manifest input_schema with actual run() parameters
+            manifest = deepcopy(tool.manifest)
+            try:
+                tree = ast.parse(code)
+                run_node = None
+                for node in tree.body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run":
+                        run_node = node
+                        break
+                if run_node and manifest:
+                    param_names = [arg.arg for arg in run_node.args.args if arg.arg != "self"]
+                    param_names.extend([arg.arg for arg in run_node.args.kwonlyargs])
+                    new_input_schema = {}
+                    for p in param_names:
+                        new_input_schema[p] = manifest.input_schema.get(p, "str") if manifest.input_schema else "str"
+                    manifest.input_schema = new_input_schema
+                    fixes_summary["schema_synced"] = True
+            except Exception as e:
+                log.warning("postprocessor_schema_sync_failed", error=str(e))
+
+            # 7. Auto-detect and include non-stdlib imports into requirements
+            try:
+                tree = ast.parse(code)
+                stdlib = sys.stdlib_module_names if sys.version_info >= (3, 10) else set()
+                imported_roots = set()
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            imported_roots.add(alias.name.split(".")[0])
+                    elif isinstance(node, ast.ImportFrom):
+                        if node.level == 0 and node.module:
+                            imported_roots.add(node.module.split(".")[0])
+                
+                norm_reqs = {r.split("[")[0].split(">")[0].split("<")[0].split("=")[0].strip().lower() for r in requirements}
+                for mod in imported_roots:
+                    if mod not in stdlib and mod.lower() not in norm_reqs:
+                        requirements.append(mod)
+                        norm_reqs.add(mod.lower())
+                        fixes_summary["inferred_requirements_added"] = True
+            except Exception as e:
+                log.warning("postprocessor_auto_reqs_failed", error=str(e))
+
             if fixes_summary:
                 log.info("postprocessor_fixes_applied", **fixes_summary)
 
-            # Build a new GeneratedTool with the fixed code and requirements
+            # Build a new GeneratedTool with the fixed code, requirements, and manifest
             return GeneratedTool(
                 name=tool.name,
                 code=code,
                 requirements=requirements,
-                manifest=tool.manifest,
+                manifest=manifest,
                 tests=tests_code,
                 readme=tool.readme,
                 created_at=tool.created_at,
