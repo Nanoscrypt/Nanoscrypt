@@ -10,6 +10,13 @@ if sys.platform == "win32":
         pass
 
 from nanoscrypt.cli.commands import agents, init, run, serve, tools
+from nanoscrypt.cli.setup import prompt_provider_and_key
+
+
+def setup_cmd():
+    """Configures the LLM provider, API Key, and model stored in user root ~/.nanoscrypt/config.toml."""
+    prompt_provider_and_key(force=True)
+
 
 app = typer.Typer(
     name="nanoscrypt",
@@ -18,6 +25,7 @@ app = typer.Typer(
 )
 
 # Register command submodules
+app.command(name="setup")(setup_cmd)
 app.command(name="init")(init.init_cmd)
 app.command(name="run")(run.run_cmd)
 app.command(name="serve")(serve.serve_cmd)
