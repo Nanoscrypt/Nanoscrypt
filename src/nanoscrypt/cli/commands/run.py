@@ -28,6 +28,8 @@ class FileCompleter(Completer):
         self.workspace_root = workspace_root
         self.slash_commands = [
             "/help",
+            "/setup",
+            "/config",
             "/cost",
             "/model",
             "/profile",
@@ -199,9 +201,15 @@ def run_cmd(
     sess_id = session_id or f"cli_{uuid.uuid4().hex[:8]}"
 
     async def async_run():
+        from nanoscrypt.cli.setup import ensure_user_configured
         from nanoscrypt.logging import setup_logging
 
         setup_logging()
+
+        # Prompt user to configure API key & provider on first start if not configured
+        if ensure_user_configured(interactive=True):
+            from nanoscrypt.config.settings import reload_settings
+            reload_settings()
 
         # Initialize dependencies
         orchestrator = await get_orchestrator()
@@ -423,6 +431,8 @@ def run_cmd(
             if cmd in ("/", "/help"):
                 console.print("[bold]Available Commands:[/bold]")
                 console.print("  /help                Show this help menu")
+                console.print("  /setup               Re-run initial provider & API key setup wizard")
+                console.print("  /config              Display stored user root configuration")
                 console.print("  /cost                Show cumulative token and USD cost")
                 console.print("  /model               Show current LLM model configuration")
                 console.print("  /model <model_name>  Change the active model dynamically")
@@ -432,6 +442,32 @@ def run_cmd(
                 console.print("  /clear               Clear the conversation session history")
                 console.print("  /history             Print history of the current session")
                 console.print("  /exit                Exit the REPL session")
+                return True
+            elif cmd in ("/setup", "/configure"):
+                from nanoscrypt.cli.setup import prompt_provider_and_key
+                if prompt_provider_and_key(force=True):
+                    from nanoscrypt.config.settings import reload_settings
+                    new_cfg = reload_settings()
+                    if hasattr(orchestrator.planner.llm, "default_model"):
+                        orchestrator.planner.llm.default_model = new_cfg.llm.model
+                    if hasattr(orchestrator.generator.llm, "default_model"):
+                        orchestrator.generator.llm.default_model = new_cfg.llm.model
+                    if orchestrator.repair_loop and hasattr(orchestrator.repair_loop.llm, "default_model"):
+                        orchestrator.repair_loop.llm.default_model = new_cfg.llm.model
+                return True
+            elif cmd == "/config":
+                from nanoscrypt.config.user_config import GLOBAL_CONFIG_FILE, load_global_config
+                cfg = load_global_config()
+                if not cfg:
+                    console.print(f"  [yellow]No configuration found in {GLOBAL_CONFIG_FILE}. Run /setup to configure.[/yellow]")
+                else:
+                    console.print(f"[bold]Global User Configuration ({GLOBAL_CONFIG_FILE}):[/bold]")
+                    for section, values in cfg.items():
+                        console.print(f"  [cyan][{section}][/cyan]")
+                        if isinstance(values, dict):
+                            for k, v in values.items():
+                                display_v = "••••••••" if "key" in k.lower() and v else v
+                                console.print(f"    {k} = {display_v}")
                 return True
             elif cmd == "/memory":
                 rest = rest.strip()
