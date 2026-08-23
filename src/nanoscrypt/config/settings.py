@@ -10,7 +10,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class LLMSettings(BaseModel):
+    provider: str = "ollama"
     model: str = "ollama/qwen2.5-coder"
+    api_key: str | None = None
+    api_base: str | None = None
     temperature: float = 0.2
     max_tokens: int = 131072  # Qwen 2.5 Coder 128K max
     max_output_tokens: int = 4096  # Max generation length (streamlined for local Ollama)
@@ -97,27 +100,54 @@ class Settings(BaseSettings):
 
 
 def load_settings(config_path: Path | str | None = None) -> Settings:
-    """Loads configuration settings from TOML config file and environment variables."""
-    if config_path is None:
-        config_path = Path("nanoscrypt.toml")
-    else:
-        config_path = Path(config_path)
+    """Loads configuration settings merging user root ~/.nanoscrypt/config.toml,
+    project-level nanoscrypt.toml, and environment variables."""
+    from nanoscrypt.config.user_config import apply_global_env, load_global_config
+
+    # Apply global environment variables from ~/.nanoscrypt/config.toml
+    apply_global_env()
 
     toml_data: dict[str, Any] = {}
-    if config_path.exists():
+
+    # 1. Load project-level config (nanoscrypt.toml) as base
+    if config_path is None:
+        local_path = Path("nanoscrypt.toml")
+    else:
+        local_path = Path(config_path)
+
+    if local_path.exists():
         try:
-            with open(config_path, "rb") as f:
-                toml_data = tomllib.load(f)
+            with open(local_path, "rb") as f:
+                local_data = tomllib.load(f)
+                for k, v in local_data.items():
+                    toml_data[k] = v
         except Exception as e:
-            # Fallback to defaults or env variables if file reading fails
             import logging
 
             logging.warning(
-                f"Failed to parse TOML configuration from {config_path}: {e}"
+                f"Failed to parse TOML configuration from {local_path}: {e}"
             )
 
-    # Load settings using the dictionary from TOML, env variables override this
+    # 2. Merge user root config (~/.nanoscrypt/config.toml) with high priority
+    global_cfg = load_global_config()
+    if global_cfg:
+        for k, v in global_cfg.items():
+            if isinstance(v, dict) and isinstance(toml_data.get(k), dict):
+                toml_data[k].update(v)
+            else:
+                toml_data[k] = v
+
     return Settings(**toml_data)
 
 
 settings = load_settings()
+
+
+def reload_settings(config_path: Path | str | None = None) -> Settings:
+    """Re-reads global and local configuration files and updates the global settings instance."""
+    global settings
+    new_settings = load_settings(config_path)
+    # Mutate in-place so existing module references get updated
+    for field in settings.model_fields.keys():
+        setattr(settings, field, getattr(new_settings, field))
+    return settings
