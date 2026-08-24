@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nanoscrypt"
-version = "0.2.0"
+version = "0.3.0"
 description = "A standalone agentic framework that dynamically synthesizes, validates, executes, versions, and reuses tools."
 readme = "README.md"
 requires-python = ">=3.10"
