@@ -4,11 +4,23 @@ from pydantic import BaseModel, Field
 class PlannerDecision(BaseModel):
     action: str = Field(
         ...,
-        description="Action to take: generate_tool, reuse_tool, direct_response, clarify, execute_pipeline",
+        description="Action to take: generate_tool, reuse_tool, evolve_tool, direct_response, clarify, execute_pipeline",
     )
     tool_name: str | None = Field(
         default=None,
-        description="Target tool name if action is generate_tool or reuse_tool",
+        description="Target tool name if action is generate_tool, reuse_tool, or evolve_tool",
+    )
+    base_version: int | None = Field(
+        default=None,
+        description="Base version number to evolve from if action is evolve_tool",
+    )
+    mutation_goals: list[str] = Field(
+        default_factory=list,
+        description="List of specific feature additions/changes when evolving an existing tool",
+    )
+    similarity_score: float | None = Field(
+        default=None,
+        description="Similarity match score against candidate tool (0.0 - 1.0)",
     )
     tool_purpose: str | None = Field(
         default=None, description="Short summary of what tool should accomplish"
