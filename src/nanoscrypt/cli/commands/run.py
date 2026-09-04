@@ -406,6 +406,18 @@ def run_cmd(
                         padding=(1, 2),
                     )
                 )
+            elif result.get("action_taken") == "evolve_tool" and result.get("status") == "failed":
+                rb_ver = result.get("rollback_version", 1)
+                console.print(
+                    Panel(
+                        f"[yellow]Tool evolution was rejected to preserve stability.[/yellow]\n\n"
+                        f"{result.get('error')}\n\n"
+                        f"[green]✓ Automatic Rollback:[/green] System reverted safely to verified base [bold]v{rb_ver}[/bold].",
+                        title="[bold yellow]Evolution Test Regression - Rolled Back[/bold yellow]",
+                        border_style="yellow",
+                        padding=(1, 2),
+                    )
+                )
             else:
                 console.print(
                     Panel(
