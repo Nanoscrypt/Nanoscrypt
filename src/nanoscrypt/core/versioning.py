@@ -2,6 +2,7 @@ import difflib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Optional
 
 import structlog
 
@@ -155,3 +156,60 @@ class VersionManager:
             code1, code2, fromfile=f"v{v1}/tool.py", tofile=f"v{v2}/tool.py"
         )
         return "\n".join(diff_lines)
+
+    def load_version_tool(self, tool_name: str, version: int | None = None) -> Any:
+        """Reconstructs a GeneratedTool dataclass from a specific snapshot version folder."""
+        from nanoscrypt.models.tool import GeneratedTool, ToolManifest
+
+        if version is None:
+            version = self.get_current_version_number(tool_name)
+        if version is None:
+            return None
+
+        v_dir = self.get_version_directory(tool_name, version)
+        if not v_dir or not (v_dir / "tool.py").exists():
+            return None
+
+        code = (v_dir / "tool.py").read_text(encoding="utf-8")
+        reqs = []
+        if (v_dir / "requirements.txt").exists():
+            reqs = [
+                line.strip()
+                for line in (v_dir / "requirements.txt").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        manifest_data = {}
+        if (v_dir / "manifest.json").exists():
+            try:
+                manifest_data = json.loads((v_dir / "manifest.json").read_text(encoding="utf-8"))
+            except Exception:
+                manifest_data = {}
+
+        manifest = ToolManifest(**manifest_data) if manifest_data else ToolManifest(name=tool_name, purpose="")
+        tests = (v_dir / "tests.py").read_text(encoding="utf-8") if (v_dir / "tests.py").exists() else ""
+        readme = (v_dir / "README.md").read_text(encoding="utf-8") if (v_dir / "README.md").exists() else ""
+
+        return GeneratedTool(
+            name=tool_name,
+            code=code,
+            requirements=reqs,
+            manifest=manifest,
+            tests=tests,
+            readme=readme,
+        )
+
+    def get_lineage(self, tool_name: str) -> list[dict]:
+        """Returns the chronological evolution lineage tree for a tool."""
+        versions = self.get_versions(tool_name)
+        lineage = []
+        for v in versions:
+            v_dir = self.get_version_directory(tool_name, v)
+            if v_dir and (v_dir / "version.json").exists():
+                try:
+                    meta = json.loads((v_dir / "version.json").read_text(encoding="utf-8"))
+                    lineage.append(meta)
+                except Exception:
+                    lineage.append({"version": v, "error": "corrupted_metadata"})
+        return lineage
+
