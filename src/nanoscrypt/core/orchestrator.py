@@ -75,6 +75,10 @@ class Orchestrator:
         self.memmachine = MemMachineEngine(registry.session_factory)
         self.policy_engine = PolicyEngine()
         self.pipeline_executor = PipelineExecutor(self)
+        from nanoscrypt.core.mutator import ToolMutator
+        from nanoscrypt.core.similarity import SimilarityMatcher
+        self.tool_mutator = ToolMutator(llm=self.generator.llm)
+        self.similarity_matcher = SimilarityMatcher()
 
     async def _extract_parameters(
         self, user_prompt: str, input_schema: dict, agent_name: str, session_id: str
@@ -385,7 +389,27 @@ class Orchestrator:
                 reasoning="Direct text explanation query with file context.",
             )
         else:
+            # Check similarity matcher for potential tool evolution candidates
+            evo_candidate = self.similarity_matcher.find_candidate(
+                user_prompt=user_prompt,
+                registered_tools=serialized_tools,
+            )
             decision = await self.planner.decide(assembled_prompt)
+
+            # If planner chose generate_tool but a high-scoring evolution candidate exists, elevate to evolve_tool
+            if decision.action == "generate_tool" and evo_candidate:
+                log.info(
+                    "orchestrator_elevating_to_evolve_tool",
+                    candidate_tool=evo_candidate.tool_name,
+                    base_version=evo_candidate.base_version,
+                    score=evo_candidate.similarity_score,
+                )
+                decision.action = "evolve_tool"
+                decision.tool_name = evo_candidate.tool_name
+                decision.base_version = evo_candidate.base_version
+                decision.similarity_score = evo_candidate.similarity_score
+                if not decision.mutation_goals and evo_candidate.missing_parameters:
+                    decision.mutation_goals = [f"Add support for {p}" for p in evo_candidate.missing_parameters]
         log.info("orchestrator_planner_decision", action=decision.action)
 
         # Log LLM call to audit logger
@@ -632,8 +656,28 @@ class Orchestrator:
                         "error": "Tool synthesis denied by security policy approval gate.",
                     }
 
-            # Generate
-            target_tool = await self.generator.generate(decision, user_prompt=user_prompt)
+            # Check if this is an evolution action
+            is_evolution = decision.action == "evolve_tool"
+            base_tool_for_evolution = None
+
+            if is_evolution:
+                base_ver = decision.base_version or self.version_manager.get_current_version_number(tool_name)
+                base_tool_for_evolution = self.version_manager.load_version_tool(tool_name, base_ver)
+                if base_tool_for_evolution:
+                    log.info("orchestrator_evolving_tool_via_mutator", tool_name=tool_name, base_version=base_ver)
+                    target_tool = await self.tool_mutator.evolve(
+                        base_tool=base_tool_for_evolution,
+                        base_version=base_ver,
+                        user_prompt=user_prompt,
+                        mutation_goals=decision.mutation_goals,
+                    )
+                else:
+                    log.warning("base_tool_snapshot_missing_falling_back_to_generator", tool_name=tool_name)
+                    target_tool = await self.generator.generate(decision, user_prompt=user_prompt)
+                    is_evolution = False
+            else:
+                # Generate new tool from scratch
+                target_tool = await self.generator.generate(decision, user_prompt=user_prompt)
 
             # Post-process: auto-fix common LLM code issues
             post_processor = CodePostProcessor(llm=self.generator.llm)
@@ -719,6 +763,23 @@ class Orchestrator:
             if val_result.formatted_code:
                 target_tool.code = val_result.formatted_code
 
+            # Dual-Suite Regression Testing for evolved tools
+            if is_evolution and base_tool_for_evolution and self.repair_loop:
+                passed, reg_msg, reg_res = self.repair_loop.run_dual_suite_tests(
+                    session_id=session.id,
+                    base_tool=base_tool_for_evolution,
+                    evolved_tool=target_tool,
+                )
+                if not passed:
+                    log.error("orchestrator_evolution_dual_suite_failed", reason=reg_msg)
+                    # Notify user of regression failure and rollback
+                    return {
+                        "status": "failed",
+                        "action_taken": "evolve_tool",
+                        "error": f"Evolution rejected due to test regression:\n{reg_msg}",
+                        "rollback_version": base_ver,
+                    }
+
             # Version tool snapshot on disk
             version_number = self.version_manager.create_version(
                 tool_name=tool_name,
@@ -728,15 +789,17 @@ class Orchestrator:
                 tests=target_tool.tests,
                 readme=target_tool.readme,
                 prompt=user_prompt,
+                parent_version=base_ver if is_evolution else None,
+                change_reason="evolution" if is_evolution else "initial",
             )
 
             # Register in database
             await self.registry.register(
                 tool=target_tool,
                 code_hash=self.version_manager.diff(
-                    tool_name, version_number, version_number
+                    tool_name, base_ver if is_evolution else version_number, version_number
                 )
-                or "initial",
+                or ("evolution" if is_evolution else "initial"),
                 prompt_used=user_prompt,
             )
 

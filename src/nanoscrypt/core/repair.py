@@ -228,6 +228,52 @@ class RepairLoop:
             workspace_path=workspace,
         )
 
+    def run_dual_suite_tests(
+        self,
+        session_id: str,
+        base_tool: GeneratedTool,
+        evolved_tool: GeneratedTool,
+    ) -> tuple[bool, str, ExecutionResult]:
+        """Executes both base version tests and evolved version tests against the evolved tool code.
+        Suite 1: base_tool.tests on evolved_tool.code (guarantees backwards compatibility)
+        Suite 2: evolved_tool.tests on evolved_tool.code (verifies new feature implementation)"""
+        log = logger.bind(component="dual_suite_runner", tool_name=evolved_tool.name)
+        log.info("running_dual_suite_regression_tests")
+
+        # 1. Setup workspace with the evolved tool code
+        self.runtime_manager.setup_workspace(session_id, evolved_tool)
+
+        # 2. Run Suite 1: Backwards compatibility test suite
+        if base_tool and base_tool.tests and base_tool.tests.strip():
+            log.info("running_suite_1_backwards_compatibility_tests")
+            test_tool_suite1 = GeneratedTool(
+                name=evolved_tool.name,
+                code=evolved_tool.code,
+                requirements=evolved_tool.requirements,
+                manifest=evolved_tool.manifest,
+                tests=base_tool.tests,
+                readme=evolved_tool.readme,
+            )
+            res1 = self.run_tests_in_sandbox(session_id, test_tool_suite1)
+            if res1.return_code != 0:
+                err_msg = f"Regression failure in Suite 1 (base v{base_tool.manifest.input_schema} compatibility):\n{res1.stderr or res1.stdout}"
+                log.warn("suite_1_regression_failed", error=err_msg)
+                return False, err_msg, res1
+
+        # 3. Run Suite 2: New feature evolution test suite
+        if evolved_tool.tests and evolved_tool.tests.strip():
+            log.info("running_suite_2_new_feature_tests")
+            res2 = self.run_tests_in_sandbox(session_id, evolved_tool)
+            if res2.return_code != 0:
+                err_msg = f"Feature failure in Suite 2 (new evolution tests):\n{res2.stderr or res2.stdout}"
+                log.warn("suite_2_feature_test_failed", error=err_msg)
+                return False, err_msg, res2
+        else:
+            res2 = ExecutionResult(stdout="", stderr="", return_code=0, runtime_ms=0, timed_out=False, workspace_path=self.runtime_manager.get_session_workspace(session_id))
+
+        log.info("dual_suite_tests_passed_successfully")
+        return True, "All regression and feature tests passed", res2
+
     async def repair_tool(
         self,
         session_id: str,
