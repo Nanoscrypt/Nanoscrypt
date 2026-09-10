@@ -489,17 +489,33 @@ def run_cmd(
                         from nanoscrypt.utils.async_runner import run_sync
                         res = run_sync(orchestrator.memmachine.search_memories(user_id="default_user", query=query))
                         if res:
-                            console.print(f"[bold]MemMachine Semantic Search Results for '{query}':[/bold]")
+                            source_desc = "MemMachine" if getattr(orchestrator.memmachine, "_connected", False) else "SQLite"
+                            console.print(f"[bold]{source_desc} Memory Search Results for '{query}':[/bold]")
                             for idx, item in enumerate(res, 1):
                                 text = item.get("text", str(item))
-                                console.print(f"  {idx}. [cyan]{text}[/cyan]")
+                                score_info = f" [dim](match: {int(item.get('score', 1.0) * 100)}%)[/dim]" if "score" in item else ""
+                                console.print(f"  {idx}. [cyan]{text}[/cyan]{score_info}")
                         else:
-                            console.print(f"  [dim]No semantic vector memory matches found for '{query}'.[/dim]")
+                            console.print(f"  [dim]No memory matches found for '{query}'.[/dim]")
                     else:
                         console.print("  [yellow]Usage:[/yellow] /memory search <query>")
+                elif rest.startswith("add "):
+                    mem_text = rest[4:].strip()
+                    if mem_text:
+                        from nanoscrypt.utils.async_runner import run_sync
+                        ok = run_sync(orchestrator.memmachine.add_memory(user_id="default_user", agent_id="orchestrator", text=mem_text))
+                        if ok:
+                            console.print(f"  [green]Saved memory:[/green] {mem_text}")
+                        else:
+                            console.print("  [red]Failed to save memory.[/red]")
+                    else:
+                        console.print("  [yellow]Usage:[/yellow] /memory add <text to remember>")
                 else:
-                    console.print("  [bold]MemMachine Memory Commands:[/bold]")
-                    console.print("    /memory search <query>  Search memories semantically via MemMachine vector engine")
+                    engine_type = "MemMachine (Live)" if getattr(orchestrator.memmachine, "_connected", False) else "SQLite (Local Persistent)"
+                    console.print(f"  [bold]Memory Engine:[/bold] [cyan]{engine_type}[/cyan]")
+                    console.print("  [bold]Commands:[/bold]")
+                    console.print("    /memory search <query>  Search memories semantically or by keywords")
+                    console.print("    /memory add <text>      Add a persistent memory manually")
                 return True
             elif cmd == "/profile":
                 rest = rest.strip()
