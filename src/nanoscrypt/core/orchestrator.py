@@ -268,30 +268,39 @@ class Orchestrator:
         personal_profile = None
         semantic_memories = []
         if settings.memory.enabled:
+            # 4a. Extract personal facts (gated regex/llm)
             try:
                 await asyncio.wait_for(
                     self.user_personal_memory.extract_and_store(user_prompt),
                     timeout=3.0,
                 )
+            except Exception as e:
+                log.debug("orchestrator_personal_memory_extract_error", error=str(e))
+
+            try:
                 personal_profile = await asyncio.wait_for(
                     self.user_personal_memory.get_profile(), timeout=2.0
                 )
-                await asyncio.wait_for(
-                    self.memmachine.add_memory(
-                        user_id="default_user",
-                        agent_id=active_agent.name,
-                        text=user_prompt,
-                    ),
-                    timeout=2.0,
-                )
-                semantic_memories = await asyncio.wait_for(
-                    self.memmachine.search_memories(
-                        user_id="default_user", query=user_prompt
-                    ),
-                    timeout=2.0,
+            except Exception as e:
+                log.debug("orchestrator_personal_memory_profile_error", error=str(e))
+
+            # 4b. Add to persistent semantic memory
+            try:
+                await self.memmachine.add_memory(
+                    user_id="default_user",
+                    agent_id=active_agent.name,
+                    text=user_prompt,
                 )
             except Exception as e:
-                log.debug("orchestrator_memory_step_timeout_or_error", error=str(e))
+                log.debug("orchestrator_memmachine_add_error", error=str(e))
+
+            # 4c. Search matching semantic memories for prompt context
+            try:
+                semantic_memories = await self.memmachine.search_memories(
+                    user_id="default_user", query=user_prompt
+                )
+            except Exception as e:
+                log.debug("orchestrator_memmachine_search_error", error=str(e))
 
         # Build Context Prompt
         assembled_prompt = self.context_builder.assemble(
