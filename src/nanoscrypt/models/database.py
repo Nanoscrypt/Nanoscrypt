@@ -145,3 +145,15 @@ class DBApprovalRecord(Base):
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     resolved_at = Column(DateTime, nullable=True)
     reason = Column(Text, nullable=True)
+
+
+class DBSemanticMemory(Base):
+    __tablename__ = "semantic_memories"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, index=True, nullable=False, default="default_user")
+    agent_id = Column(String, default="orchestrator", nullable=False)
+    text = Column(Text, nullable=False)
+    metadata_json = Column(JSON, default=dict, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
