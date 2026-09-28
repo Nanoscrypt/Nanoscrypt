@@ -157,3 +157,28 @@ class DBSemanticMemory(Base):
     metadata_json = Column(JSON, default=dict, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
+
+class DBRepairAttempt(Base):
+    __tablename__ = "repair_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(String, index=True, nullable=False)
+    tool_name = Column(String, index=True, nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    strategy = Column(String, nullable=False)
+    error_classification = Column(String, nullable=False)
+    generated_code = Column(Text, nullable=False)  # Full detail, not compressed
+    diff = Column(Text, nullable=False)
+    stdout = Column(Text, nullable=True)
+    stderr = Column(Text, nullable=True)
+    return_code = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    # Link: "this repair came from that repair"
+    parent_repair_id = Column(Integer, ForeignKey("repair_attempts.id"), nullable=True)
+
+    parent_attempt = relationship(
+        "DBRepairAttempt", remote_side=[id], backref="child_attempts"
+    )
+
+
