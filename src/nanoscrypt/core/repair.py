@@ -2,6 +2,7 @@ import asyncio
 import difflib
 import subprocess
 import sys
+from typing import Any
 
 import structlog
 
@@ -13,6 +14,7 @@ from nanoscrypt.llm.prompts.repair import (
     TOOL_REPAIR_SYSTEM_PROMPT,
     TOOL_REPAIR_USER_TEMPLATE,
 )
+from nanoscrypt.models.database import DBRepairAttempt
 from nanoscrypt.models.tool import GeneratedTool
 
 logger = structlog.get_logger()
@@ -160,11 +162,13 @@ class RepairLoop:
         validator: ToolValidator,
         runtime_manager: RuntimeManager,
         max_attempts: int = 5,
+        session_factory: Any = None,
     ):
         self.llm = llm
         self.validator = validator
         self.runtime_manager = runtime_manager
         self.max_attempts = max_attempts
+        self.session_factory = session_factory
 
     def run_tests_in_sandbox(
         self, session_id: str, tool: GeneratedTool

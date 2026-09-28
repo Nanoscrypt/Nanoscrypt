@@ -65,6 +65,7 @@ async def get_orchestrator() -> Orchestrator:
         validator=validator,
         runtime_manager=runtime_manager,
         max_attempts=cfg.resilience.max_repair_attempts,
+        session_factory=registry.session_factory,
     )
 
     # Instantiate enterprise helpers

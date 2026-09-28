@@ -57,6 +57,8 @@ class Orchestrator:
         self.registry = registry
         self.version_manager = version_manager
         self.repair_loop = repair_loop
+        if self.repair_loop and getattr(self.repair_loop, "session_factory", None) is None:
+            self.repair_loop.session_factory = getattr(self.registry, "session_factory", None)
 
         # Initialize enterprise modules with defaults
         self.hook_manager = hook_manager or HookManager()
