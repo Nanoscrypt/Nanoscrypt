@@ -278,6 +278,55 @@ class RepairLoop:
         log.info("dual_suite_tests_passed_successfully")
         return True, "All regression and feature tests passed", res2
 
+    async def _save_repair_attempt(
+        self,
+        session_id: str,
+        tool_name: str,
+        attempt_number: int,
+        strategy: str,
+        error_classification: str,
+        generated_code: str,
+        diff: str,
+        stdout: str | None,
+        stderr: str | None,
+        return_code: int,
+        parent_repair_id: int | None,
+    ) -> int | None:
+        """Saves every repair attempt in full detail (not compressed) and links to its parent repair attempt."""
+        if not self.session_factory:
+            return None
+
+        try:
+            record = DBRepairAttempt(
+                session_id=session_id,
+                tool_name=tool_name,
+                attempt_number=attempt_number,
+                strategy=strategy,
+                error_classification=error_classification,
+                generated_code=generated_code,
+                diff=diff,
+                stdout=stdout,
+                stderr=stderr,
+                return_code=return_code,
+                parent_repair_id=parent_repair_id,
+            )
+
+            sess = self.session_factory()
+            if hasattr(sess, "__aenter__"):
+                async with sess as session:
+                    async with session.begin():
+                        session.add(record)
+                        await session.flush()
+                        return record.id
+            else:
+                with sess as session:
+                    session.add(record)
+                    session.commit()
+                    return record.id
+        except Exception as e:
+            logger.warning("repair_attempt_save_failed", error=str(e))
+            return None
+
     async def repair_tool(
         self,
         session_id: str,
@@ -292,6 +341,7 @@ class RepairLoop:
         current_tool = tool
         current_failure = failure_result
         attempt = 0
+        current_parent_repair_id: int | None = None
 
         max_attempts = settings.resilience.max_repair_attempts
         backoff_delay = settings.resilience.retry_delay_seconds
@@ -402,6 +452,23 @@ class RepairLoop:
                         "stderr": f"Static validation failed:\n{validation_errors}",
                     })
 
+                    # Save uncompressed repair attempt with lineage link
+                    saved_id = await self._save_repair_attempt(
+                        session_id=session_id,
+                        tool_name=current_tool.name,
+                        attempt_number=attempt,
+                        strategy=strategy,
+                        error_classification="validation_failed",
+                        generated_code=patched_tool.code,
+                        diff=diff or "No code changes.",
+                        stdout="",
+                        stderr=f"Static validation failed:\n{validation_errors}",
+                        return_code=-1,
+                        parent_repair_id=current_parent_repair_id,
+                    )
+                    if saved_id is not None:
+                        current_parent_repair_id = saved_id
+
                     current_failure = ExecutionResult(
                         stdout="",
                         stderr=f"Static validation failed:\n{validation_errors}",
@@ -422,6 +489,19 @@ class RepairLoop:
 
                 if test_res.return_code == 0:
                     log.info("repair_succeeded", attempt=attempt)
+                    await self._save_repair_attempt(
+                        session_id=session_id,
+                        tool_name=current_tool.name,
+                        attempt_number=attempt,
+                        strategy=strategy,
+                        error_classification=error_classification,
+                        generated_code=patched_tool.code,
+                        diff=diff or "No code changes.",
+                        stdout=test_res.stdout,
+                        stderr=test_res.stderr,
+                        return_code=test_res.return_code,
+                        parent_repair_id=current_parent_repair_id,
+                    )
                     return patched_tool, attempt
                 else:
                     log.warning("repair_tests_failed", attempt=attempt)
@@ -432,6 +512,24 @@ class RepairLoop:
                         "diff": diff or "No code changes.",
                         "stderr": test_res.stderr or f"Test exited with code {test_res.return_code}",
                     })
+
+                    # Save uncompressed repair attempt with lineage link
+                    saved_id = await self._save_repair_attempt(
+                        session_id=session_id,
+                        tool_name=current_tool.name,
+                        attempt_number=attempt,
+                        strategy=strategy,
+                        error_classification=error_classification,
+                        generated_code=patched_tool.code,
+                        diff=diff or "No code changes.",
+                        stdout=test_res.stdout,
+                        stderr=test_res.stderr or f"Test exited with code {test_res.return_code}",
+                        return_code=test_res.return_code,
+                        parent_repair_id=current_parent_repair_id,
+                    )
+                    if saved_id is not None:
+                        current_parent_repair_id = saved_id
+
                     current_failure = test_res
                     current_tool = patched_tool
 
@@ -444,6 +542,24 @@ class RepairLoop:
                     "diff": "Exception occurred during repair execution.",
                     "stderr": f"Repair loop logic error: {e!s}",
                 })
+
+                # Save uncompressed repair attempt with lineage link
+                saved_id = await self._save_repair_attempt(
+                    session_id=session_id,
+                    tool_name=current_tool.name,
+                    attempt_number=attempt,
+                    strategy=strategy,
+                    error_classification="exception",
+                    generated_code=patched_tool.code if ("patched_tool" in locals() and patched_tool) else (current_tool.code if current_tool else ""),
+                    diff=diff if ("diff" in locals() and diff) else "Exception occurred during repair execution.",
+                    stdout="",
+                    stderr=f"Repair loop logic error: {e!s}",
+                    return_code=-1,
+                    parent_repair_id=current_parent_repair_id,
+                )
+                if saved_id is not None:
+                    current_parent_repair_id = saved_id
+
                 current_failure = ExecutionResult(
                     stdout="",
                     stderr=f"Repair loop logic error: {e!s}",
