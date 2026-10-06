@@ -232,6 +232,13 @@ try:
         # Introspect run() signature and fill missing params with defaults
         try:
             sig = inspect.signature(tool.run)
+            has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            if not has_var_keyword:
+                filtered_args = dict()
+                for key_param, val_param in args.items():
+                    if key_param in sig.parameters:
+                        filtered_args[key_param] = val_param
+                args = filtered_args
             for param_name, param in sig.parameters.items():
                 if param_name not in args and param.default is not inspect.Parameter.empty:
                     args[param_name] = param.default

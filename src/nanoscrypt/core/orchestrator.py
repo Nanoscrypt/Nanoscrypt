@@ -94,11 +94,17 @@ class Orchestrator:
             parsed = json.loads(user_prompt)
             if isinstance(parsed, dict):
                 clean_params = {}
-                for k, v in parsed.items():
-                    val = str(v).strip()
-                    if (val.startswith("'") and val.endswith("'")) or (val.startswith('"') and val.endswith('"')):
-                        val = val[1:-1].strip()
-                    clean_params[k] = val
+                data_dict = parsed.get("input_data", parsed) if isinstance(parsed.get("input_data"), dict) else parsed
+                for k, v in data_dict.items():
+                    if k == "tool_name":
+                        continue
+                    if isinstance(v, str):
+                        val = v.strip()
+                        if (val.startswith("'") and val.endswith("'")) or (val.startswith('"') and val.endswith('"')):
+                            val = val[1:-1].strip()
+                        clean_params[k] = val
+                    else:
+                        clean_params[k] = v
                 return json.dumps(clean_params)
         except Exception:
             pass
@@ -376,6 +382,7 @@ class Orchestrator:
             "mkdir",
             "remove",
             "run",
+            "reuse",
         ]
         prompt_lower = user_prompt.lower()
         has_action_intent = any(kw in prompt_lower for kw in action_keywords)
@@ -453,10 +460,11 @@ class Orchestrator:
                 log.info("routing_to_execute_pipeline_from_steps", steps_count=len(decision.pipeline_steps))
                 decision.action = "execute_pipeline"
 
-        if any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt:
-            if not any(kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write "]):
-                log.info("forcing_direct_response_for_explanation_request", prompt=user_prompt)
-                decision.action = "direct_response"
+        if decision.action not in ("reuse_tool", "execute_pipeline") and not decision.tool_name:
+            if any(kw in prompt_lower for kw in explain_keywords) or "@" in user_prompt:
+                if not any(kw in prompt_lower for kw in ["create ", "delete ", "mkdir ", "remove ", "write ", "reuse ", "run "]):
+                    log.info("forcing_direct_response_for_explanation_request", prompt=user_prompt)
+                    decision.action = "direct_response"
 
         op_keywords = ["create", "folder", "directory", "make", "mkdir", "write", "file", "delete", "remove"]
         if (
