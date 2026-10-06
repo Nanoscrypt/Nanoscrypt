@@ -58,6 +58,13 @@ class LiteLLMProvider(LLMProvider):
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _inject_llm_credentials(kwargs: dict[str, Any]) -> None:
+        if "api_key" not in kwargs and settings.llm.api_key:
+            kwargs["api_key"] = settings.llm.api_key
+        if "api_base" not in kwargs and settings.llm.api_base:
+            kwargs["api_base"] = settings.llm.api_base
+
     async def _execute_with_retry(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         """Executes LiteLLM completion calls with automatic backoff and fallback model rotation."""
         model = kwargs.get("model", self.default_model)
@@ -110,10 +117,7 @@ class LiteLLMProvider(LLMProvider):
         # Execute completion inside the retry context
         if "timeout" not in kwargs:
             kwargs["timeout"] = 1800.0
-        if "api_key" not in kwargs and getattr(settings.llm, "api_key", None):
-            kwargs["api_key"] = settings.llm.api_key
-        if "api_base" not in kwargs and getattr(settings.llm, "api_base", None):
-            kwargs["api_base"] = settings.llm.api_base
+        self._inject_llm_credentials(kwargs)
 
         response = await self._execute_with_retry(
             litellm.acompletion,
@@ -230,6 +234,7 @@ class LiteLLMProvider(LLMProvider):
 
         if "timeout" not in kwargs:
             kwargs["timeout"] = 1800.0
+        self._inject_llm_credentials(kwargs)
         response = await self._execute_with_retry(
             litellm.acompletion,
             model=model,

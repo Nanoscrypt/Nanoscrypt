@@ -35,6 +35,31 @@ def test_save_and_load_global_config(tmp_path, monkeypatch):
     assert cfg["llm"]["model"] == "gpt-4o"
 
 
+def test_saving_empty_credentials_clears_previous_key_and_api_base(tmp_path, monkeypatch):
+    test_dir = tmp_path / ".nanoscrypt"
+    test_file = test_dir / "config.toml"
+
+    monkeypatch.setattr("nanoscrypt.config.user_config.GLOBAL_CONFIG_DIR", test_dir)
+    monkeypatch.setattr("nanoscrypt.config.user_config.GLOBAL_CONFIG_FILE", test_file)
+
+    save_global_config(
+        provider="custom",
+        api_key="test-api-key",
+        model="nvidia_nim/example/model",
+        api_base="https://example.invalid/v1",
+    )
+    save_global_config(
+        provider="custom",
+        api_key=None,
+        model="nvidia_nim/example/model",
+        api_base=None,
+    )
+
+    cfg = load_global_config()
+    assert "api_key" not in cfg["llm"]
+    assert "api_base" not in cfg["llm"]
+
+
 def test_apply_global_env(tmp_path, monkeypatch):
     test_dir = tmp_path / ".nanoscrypt"
     test_file = test_dir / "config.toml"

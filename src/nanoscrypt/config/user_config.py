@@ -25,9 +25,9 @@ SUPPORTED_PROVIDERS = {
         "name": "Anthropic",
         "default_model": "claude-3-5-sonnet-20241022",
         "popular_models": [
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-haiku-20241022",
-            "claude-3-opus-20240229",
+            "claude-4-5-sonnet-20241022",
+            "claude-4-5-haiku-20241022",
+            "claude-4-6-opus-20240229",
         ],
         "api_key_env": "ANTHROPIC_API_KEY",
         "requires_key": True,
@@ -37,9 +37,9 @@ SUPPORTED_PROVIDERS = {
         "name": "Google Gemini",
         "default_model": "gemini/gemini-1.5-pro",
         "popular_models": [
-            "gemini/gemini-1.5-pro",
-            "gemini/gemini-1.5-flash",
-            "gemini/gemini-2.0-flash-exp",
+            "gemini/gemini-3.1-pro",
+            "gemini/gemini-3.8-flash",
+            "gemini/gemini-3.5-flash-lite",
         ],
         "api_key_env": "GEMINI_API_KEY",
         "requires_key": True,
@@ -132,10 +132,14 @@ def save_global_config(
     llm_section["provider"] = provider
     if model:
         llm_section["model"] = model
-    if api_key:
+    if api_key is not None:
         llm_section["api_key"] = api_key
-    if api_base:
+    else:
+        llm_section.pop("api_key", None)
+    if api_base is not None:
         llm_section["api_base"] = api_base
+    else:
+        llm_section.pop("api_base", None)
 
     current["llm"] = llm_section
 
