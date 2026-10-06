@@ -43,7 +43,12 @@ def prompt_provider_and_key(force: bool = False) -> bool:
     console.print("[bold]Available Providers:[/bold]")
     for idx, p_key in enumerate(provider_keys, 1):
         p_info = SUPPORTED_PROVIDERS[p_key]
-        tag = "[green](No API key needed)[/green]" if not p_info["requires_key"] else "[yellow](API Key required)[/yellow]"
+        if p_info["requires_key"]:
+            tag = "[yellow](API Key required)[/yellow]"
+        elif p_key == "custom":
+            tag = "[yellow](API Key optional)[/yellow]"
+        else:
+            tag = "[green](No API key needed)[/green]"
         console.print(f"  [cyan]{idx}.[/cyan] [bold]{p_info['name']}[/bold] {tag} - Default: [dim]{p_info['default_model']}[/dim]")
     console.print()
 
@@ -71,34 +76,59 @@ def prompt_provider_and_key(force: bool = False) -> bool:
 
     # 3. Prompt for API Key if required
     api_key = None
-    if provider_info["requires_key"]:
+    if provider_info["requires_key"] or selected_key == "custom":
         env_name = provider_info.get("api_key_env", "API_KEY")
         existing_env_key = os.environ.get(env_name, "")
-        
-        console.print(f"[bold yellow]→ Please provide your {provider_info['name']} API Key:[/bold yellow]")
+
+        optional_key = not provider_info["requires_key"]
+        key_prompt = (
+            (
+                f"[bold yellow]→ Enter your {provider_info['name']} API Key "
+                "(optional):[/bold yellow]"
+            )
+            if optional_key
+            else (
+                f"[bold yellow]→ Please provide your "
+                f"{provider_info['name']} API Key:[/bold yellow]"
+            )
+        )
+        console.print(key_prompt)
         if existing_env_key:
             masked_env = existing_env_key[:4] + "..." + existing_env_key[-4:] if len(existing_env_key) > 8 else "••••••••"
             console.print(f"  [dim](Found existing {env_name} in environment: {masked_env})[/dim]")
-        
-        while True:
-            if existing_env_key:
-                prompt_text = f"API Key [dim](Press Enter to use environment default or paste key)[/dim]"
-                api_key = Prompt.ask(prompt_text, default=existing_env_key).strip()
-            else:
-                api_key = Prompt.ask(f"Paste your {provider_info['name']} API Key").strip()
 
-            if api_key:
-                break
-            console.print("[red]API Key cannot be empty for this provider. Please paste a valid key.[/red]")
-        
-        masked_display = api_key[:4] + "••••••••" + api_key[-4:] if len(api_key) > 10 else "••••••••"
-        console.print(f"[green]✓ API Key registered:[/green] [cyan]{masked_display}[/cyan]")
+        if optional_key:
+            api_key = Prompt.ask(
+                "API Key [dim](optional; press Enter to skip)[/dim]",
+                default=existing_env_key,
+            ).strip() or None
+        else:
+            while True:
+                if existing_env_key:
+                    prompt_text = f"API Key [dim](Press Enter to use environment default or paste key)[/dim]"
+                    api_key = Prompt.ask(prompt_text, default=existing_env_key).strip()
+                else:
+                    api_key = Prompt.ask(f"Paste your {provider_info['name']} API Key").strip()
+
+                if api_key:
+                    break
+                console.print("[red]API Key cannot be empty for this provider. Please paste a valid key.[/red]")
+
+        if api_key:
+            masked_display = api_key[:4] + "••••••••" + api_key[-4:] if len(api_key) > 10 else "••••••••"
+            console.print(f"[green]✓ API Key registered:[/green] [cyan]{masked_display}[/cyan]")
 
     # 4. Prompt for Model (with interactive menu and custom option)
     popular_models = provider_info.get("popular_models", [])
     default_model = provider_info["default_model"]
 
     console.print(f"\n[bold]Select Model for {provider_info['name']}:[/bold]")
+    if selected_key == "custom":
+        console.print(
+            "[dim]Use LiteLLM model syntax with its provider prefix, "
+            "for example nvidia_nim/<model-id>.[/dim]"
+        )
+
     if popular_models:
         for idx, m_name in enumerate(popular_models, 1):
             tag = " [green](Default)[/green]" if m_name == default_model else ""
