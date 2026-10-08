@@ -2,6 +2,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import threading
 import time
 import venv
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ class ExecutionResult:
     runtime_ms: int
     timed_out: bool
     workspace_path: Path
+    cancelled: bool = False
 
 
 class RuntimeManager:
@@ -38,7 +40,15 @@ class RuntimeManager:
 
     def get_session_workspace(self, session_id: str) -> Path:
         """Returns the isolated path for a specific session's workspace."""
-        return (self.workspace_root / session_id).resolve()
+        root = self.workspace_root.resolve()
+        workspace = (root / session_id).resolve()
+        try:
+            workspace.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Session workspace escapes the configured workspace root.") from exc
+        if workspace.parent != root:
+            raise ValueError("Session workspace must be a direct child of the workspace root.")
+        return workspace
 
     def get_dependencies_hash(self, requirements: list[str]) -> str:
         """Generates a stable hash for a given list of dependencies."""
@@ -78,6 +88,12 @@ class RuntimeManager:
         # Write all files in the manifest dictionary
         for rel_path, content in app_manifest.files.items():
             dest = (workspace / rel_path).resolve()
+            try:
+                dest.relative_to(workspace.resolve())
+            except ValueError as exc:
+                raise ValueError(
+                    f"Application file path escapes its workspace: {rel_path}"
+                ) from exc
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
 
@@ -183,9 +199,25 @@ class RuntimeManager:
         input_data: str,
         requirements: list[str] | None = None,
         timeout: int | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> ExecutionResult:
         """Runs the tool wrapper script using the shared/cached virtual environment python interpreter."""
         workspace = self.get_session_workspace(session_id)
+
+        capsem_path = None
+        if settings.runtime.capsem_enabled:
+            import shutil
+
+            capsem_path = shutil.which("capsem")
+            if capsem_path is None:
+                return ExecutionResult(
+                    stdout="",
+                    stderr="CapSem is enabled but unavailable; tool execution was blocked.",
+                    return_code=126,
+                    runtime_ms=0,
+                    timed_out=False,
+                    workspace_path=workspace,
+                )
 
         # Check if venv is disabled in settings
         if not getattr(settings.runtime, "use_venv", True):
@@ -272,13 +304,9 @@ except Exception as e:
         # Determine execution command list with absolute wrapper path
         wrapper_path = (workspace / "wrapper.py").resolve()
         cmd = [str(python_executable.resolve()), str(wrapper_path)]
-        if settings.runtime.capsem_enabled:
-            import shutil
-            if shutil.which("capsem"):
-                cmd = ["capsem"] + cmd
-                logger.info("runtime_executing_via_capsem_sandbox", command=cmd)
-            else:
-                logger.warning("runtime_capsem_enabled_but_binary_not_found_falling_back")
+        if capsem_path:
+            cmd = [capsem_path] + cmd
+            logger.info("runtime_executing_via_capsem_sandbox", command=cmd)
 
         project_root = Path(".").resolve()
         env = dict(os.environ)
@@ -287,31 +315,54 @@ except Exception as e:
             [str(workspace.resolve()), env.get("PYTHONPATH", "")]
         )
 
+        process: subprocess.Popen | None = None
         try:
-            result = subprocess.run(
+            process_options: dict[str, int | bool] = {}
+            if os.name == "nt":
+                process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                process_options["start_new_session"] = True
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=limit,
-                cwd=str(project_root),
+                cwd=str(workspace),
                 env=env,
+                **process_options,
             )
-            stdout = result.stdout
-            stderr = result.stderr
-            return_code = result.returncode
-        except subprocess.TimeoutExpired as e:
-            timed_out = True
-            stdout = (
-                e.stdout.decode("utf-8", errors="replace")
-                if isinstance(e.stdout, bytes)
-                else (e.stdout or "")
-            )
-            stderr = (
-                e.stderr.decode("utf-8", errors="replace")
-                if isinstance(e.stderr, bytes)
-                else (e.stderr or "Execution timed out")
-            )
-            return_code = -9
+            deadline = time.monotonic() + limit
+            while True:
+                if cancellation_event is not None and cancellation_event.is_set():
+                    self._stop_process(process)
+                    stdout, stderr = process.communicate()
+                    return_code = (
+                        process.returncode if process.returncode is not None else -15
+                    )
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    self._stop_process(process)
+                    stdout, stderr = process.communicate()
+                    return_code = (
+                        process.returncode if process.returncode is not None else -9
+                    )
+                    stderr = stderr or "Execution timed out"
+                    break
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                    return_code = process.returncode
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except Exception as e:
+            stderr = str(e)
+            stdout = ""
+            return_code = -1
+        finally:
+            if process is not None and process.poll() is None:
+                self._stop_process(process)
 
         runtime_ms = int((time.perf_counter() - start_time) * 1000)
 
@@ -329,7 +380,28 @@ except Exception as e:
             runtime_ms=runtime_ms,
             timed_out=timed_out,
             workspace_path=workspace,
+            cancelled=bool(cancellation_event and cancellation_event.is_set()),
         )
+
+    @staticmethod
+    def _stop_process(process: subprocess.Popen) -> None:
+        """Stop the process tree where supported, falling back to the child process."""
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=3,
+                    check=False,
+                )
+            else:
+                import signal as process_signal
+
+                os.killpg(process.pid, process_signal.SIGTERM)
+        except Exception:
+            process.kill()
 
     def execute_application(
         self,

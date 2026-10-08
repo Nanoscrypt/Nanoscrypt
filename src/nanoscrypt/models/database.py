@@ -34,7 +34,9 @@ class DBTool(Base):
     status = Column(
         String, default="active", nullable=False
     )  # active, deprecated, failed
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+    )
     updated_at = Column(
         DateTime,
         default=lambda: datetime.now(timezone.utc),
@@ -48,6 +50,10 @@ class DBTool(Base):
     )
     executions = relationship(
         "DBToolExecution", back_populates="tool", cascade="all, delete-orphan"
+    )
+    lifecycle = relationship(
+        "DBToolLifecycle", back_populates="tool", uselist=False,
+        cascade="all, delete-orphan"
     )
 
 
@@ -84,6 +90,43 @@ class DBToolExecution(Base):
     completed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     tool = relationship("DBTool", back_populates="executions")
+    outcome = relationship(
+        "DBToolOutcome", back_populates="execution", uselist=False,
+        cascade="all, delete-orphan"
+    )
+
+
+class DBToolLifecycle(Base):
+    """Evidence-based availability state, separate from tool execution status."""
+
+    __tablename__ = "tool_lifecycle"
+
+    tool_id = Column(Integer, ForeignKey("tools.id"), primary_key=True)
+    state = Column(String, default="candidate", nullable=False)
+    reason = Column(Text, default="Awaiting task-outcome evidence", nullable=False)
+    updated_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    tool = relationship("DBTool", back_populates="lifecycle")
+
+
+class DBToolOutcome(Base):
+    """Caller-supplied evidence about whether an execution helped its task."""
+
+    __tablename__ = "tool_outcomes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    execution_id = Column(
+        Integer, ForeignKey("tool_executions.id"), unique=True, nullable=False
+    )
+    task_key = Column(String, nullable=False, index=True)
+    contribution = Column(String, nullable=False)  # helpful, neutral, harmful
+    evidence = Column(Text, nullable=False)
+    created_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    execution = relationship("DBToolExecution", back_populates="outcome")
 
 
 # --- ENTERPRISE TABLES V0.2.0 ---

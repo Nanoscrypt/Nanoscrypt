@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,7 @@ class TaskResponse(BaseModel):
     output: str | None = None
     error: str | None = None
     runtime_ms: int | None = None
+    execution_id: int | None = None
 
 
 class ToolResponse(BaseModel):
@@ -37,6 +38,19 @@ class ToolResponse(BaseModel):
     usage_count: int
     status: str
     created_at: datetime
+    lifecycle_state: str = "shared"
+
+
+class ToolOutcomeSubmit(BaseModel):
+    execution_id: int
+    task_key: str = Field(..., min_length=1, max_length=200)
+    contribution: Literal["helpful", "neutral", "harmful"]
+    evidence: str = Field(..., min_length=3, max_length=2000)
+
+
+class ToolLifecycleAction(BaseModel):
+    state: Literal["candidate", "quarantined", "retired"]
+    reason: str = Field(..., min_length=3, max_length=1000)
 
 
 # --- ENTERPRISE SCHEMAS V0.2.0 ---

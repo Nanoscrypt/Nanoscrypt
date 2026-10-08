@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from inspect import isawaitable
@@ -17,13 +18,17 @@ class SimpleCancellationToken:
     """Cancellation token for execution loop aborts."""
 
     def __init__(self) -> None:
-        self._cancelled = False
+        self.thread_event = threading.Event()
 
     def cancel(self) -> None:
-        self._cancelled = True
+        self.thread_event.set()
 
     def is_cancelled(self) -> bool:
-        return self._cancelled
+        return self.thread_event.is_set()
+
+    async def wait_cancelled(self) -> None:
+        while not self.is_cancelled():
+            await asyncio.sleep(0.05)
 
 
 class AgentHarness:
@@ -34,10 +39,17 @@ class AgentHarness:
         orchestrator: Any,
         session: Session,
         agent: Agent | None = None,
+        max_turns: int | None = None,
+        session_store: Any = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.session = session
         self.agent = agent
+        configured_turns = (
+            settings.runtime.max_agent_turns if max_turns is None else max_turns
+        )
+        self.max_turns = max(1, configured_turns)
+        self.session_store = session_store
         self.last_result = None
         self._listeners: list[EventListener] = []
         self._current_signal: SimpleCancellationToken | None = None
@@ -67,6 +79,10 @@ class AgentHarness:
             except Exception:
                 pass
 
+    async def emit_event(self, event: AgentEvent) -> None:
+        """Notify subscribers immediately for provider-streamed response events."""
+        await self._notify(event)
+
     def cancel(self) -> None:
         if self._current_signal is not None:
             self._current_signal.cancel()
@@ -90,6 +106,18 @@ class AgentHarness:
         self._follow_up_queue.clear()
         return self.queue_update_event()
 
+    def take_queued_input(self) -> str | None:
+        """Consume pending steering/follow-up input as the next bounded turn."""
+        parts = [item["content"] for item in self._steering_queue]
+        self._steering_queue.clear()
+        if self._follow_up_queue:
+            parts.append(self._follow_up_queue.popleft()["content"])
+        return "\n\n".join(parts) if parts else None
+
+    def persist_session(self) -> None:
+        if self.session_store is not None:
+            self.session_store.save(self.session)
+
     async def prompt(self, content: str) -> AsyncIterator[AgentEvent]:
         """Appends user message and runs the generator loop."""
         if self._running:
@@ -98,11 +126,13 @@ class AgentHarness:
         self._running = True
         self._current_signal = SimpleCancellationToken()
 
-        # Steer merging
-        steering = list(self._steering_queue)
+        initial_steering = [item["content"] for item in self._steering_queue]
         self._steering_queue.clear()
-        if steering:
-            content = content + "\n\n" + "\n".join(m["content"] for m in steering)
+        if initial_steering:
+            content = (
+                f"{content}\n\nAdditional instructions:\n"
+                + "\n".join(initial_steering)
+            )
 
         try:
             async for event in run_agent_loop(

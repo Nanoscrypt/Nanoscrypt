@@ -5,14 +5,22 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from nanoscrypt.models.database import Base, DBTool, DBToolExecution, DBToolVersion
+from nanoscrypt.core.tool_lifecycle import decide_lifecycle_state
+from nanoscrypt.models.database import (
+    Base,
+    DBTool,
+    DBToolExecution,
+    DBToolLifecycle,
+    DBToolOutcome,
+    DBToolVersion,
+)
 from nanoscrypt.models.tool import GeneratedTool
 
 logger = structlog.get_logger()
 
 
 class ToolRegistry:
-    """Handles persistence, metadata indexing, and metric updates for tools in the SQLite database."""
+    """Persist tool metadata, execution metrics, and lifecycle evidence."""
 
     def __init__(self, database_url: str):
         self.engine = create_async_engine(database_url, echo=False)
@@ -65,13 +73,20 @@ class ToolRegistry:
                         output_schema=tool.manifest.output_schema,
                         tags=[tool.name],
                         current_version=1,
-                        success_rate=1.0,
+                        success_rate=0.0,
                         usage_count=0,
                         status="active",
                     )
                     session.add(db_tool)
                     # Flush to get the tool ID
                     await session.flush()
+                    session.add(
+                        DBToolLifecycle(
+                            tool_id=db_tool.id,
+                            state="candidate",
+                            reason="Awaiting task-outcome evidence",
+                        )
+                    )
                     version_num = 1
                 else:
                     # Increment version
@@ -82,6 +97,18 @@ class ToolRegistry:
                     db_tool.dependencies = list(
                         set(db_tool.dependencies + tool.manifest.dependencies)
                     )
+                    lifecycle = await session.get(DBToolLifecycle, db_tool.id)
+                    if lifecycle:
+                        lifecycle.state = "candidate"
+                        lifecycle.reason = "New version must earn shared status"
+                    else:
+                        session.add(
+                            DBToolLifecycle(
+                                tool_id=db_tool.id,
+                                state="candidate",
+                                reason="New version must earn shared status",
+                            )
+                        )
 
                 # Add version snapshot details
                 db_version = DBToolVersion(
@@ -120,7 +147,9 @@ class ToolRegistry:
             await session.commit()
             return True
 
-    async def search(self, query: str, limit: int = 5) -> list[DBTool]:
+    async def search(
+        self, query: str, limit: int = 5, shared_only: bool = False
+    ) -> list[DBTool]:
         """Performs simple keyword search matching tool name, purpose, or tags."""
         async with self.session_factory() as session:
             like_pattern = f"%{query}%"
@@ -136,6 +165,24 @@ class ToolRegistry:
                 .order_by(DBTool.success_rate.desc(), DBTool.usage_count.desc())
                 .limit(limit)
             )
+            if shared_only:
+                stmt = (
+                    select(DBTool)
+                    .outerjoin(DBToolLifecycle, DBToolLifecycle.tool_id == DBTool.id)
+                    .where(
+                        DBTool.status == "active",
+                        or_(
+                            DBToolLifecycle.state == "shared",
+                            DBToolLifecycle.tool_id.is_(None),
+                        ),
+                        or_(
+                            DBTool.name.like(like_pattern),
+                            DBTool.purpose.like(like_pattern),
+                        ),
+                    )
+                    .order_by(DBTool.success_rate.desc(), DBTool.usage_count.desc())
+                    .limit(limit)
+                )
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
@@ -147,7 +194,7 @@ class ToolRegistry:
         input_data: dict,
         output_data: dict | None = None,
         error: str | None = None,
-    ) -> None:
+    ) -> int | None:
         """Updates tool usage counts, metrics, and logs the individual execution run."""
         log = logger.bind(component="registry", tool_name=tool_name)
 
@@ -175,6 +222,8 @@ class ToolRegistry:
                     completed_at=datetime.now(timezone.utc),
                 )
                 session.add(exec_record)
+                await session.flush()
+                execution_id = exec_record.id
 
                 # Fetch all execution stats to re-compute success rate
                 stmt_all = select(DBToolExecution.success).where(
@@ -198,3 +247,118 @@ class ToolRegistry:
                 total_runs=total_runs,
                 success_rate=db_tool.success_rate,
             )
+            return execution_id
+
+    async def record_outcome(
+        self,
+        execution_id: int,
+        task_key: str,
+        contribution: str,
+        evidence: str,
+    ) -> dict | None:
+        """Record explicit task-level feedback and update the tool's lifecycle state."""
+        async with self.session_factory() as session:
+            async with session.begin():
+                execution = await session.get(DBToolExecution, execution_id)
+                if execution is None:
+                    return None
+                prior_outcome = await session.execute(
+                    select(DBToolOutcome.id).where(
+                        DBToolOutcome.execution_id == execution.id
+                    )
+                )
+                if prior_outcome.scalar_one_or_none() is not None:
+                    raise ValueError(
+                        "An outcome has already been recorded for this execution"
+                    )
+
+                lifecycle = await session.get(DBToolLifecycle, execution.tool_id)
+                if lifecycle is None:
+                    lifecycle = DBToolLifecycle(
+                        tool_id=execution.tool_id,
+                        state="shared",
+                        reason="Existing tool treated as shared pending new evidence",
+                    )
+                    session.add(lifecycle)
+                    await session.flush()
+
+                session.add(
+                    DBToolOutcome(
+                        execution_id=execution.id,
+                        task_key=task_key.strip().casefold(),
+                        contribution=contribution,
+                        evidence=evidence.strip(),
+                    )
+                )
+                await session.flush()
+
+                result = await session.execute(
+                    select(DBToolOutcome.task_key, DBToolOutcome.contribution)
+                    .join(
+                        DBToolExecution,
+                        DBToolExecution.id == DBToolOutcome.execution_id,
+                    )
+                    .where(
+                        DBToolExecution.tool_id == execution.tool_id,
+                        DBToolExecution.version == execution.version,
+                    )
+                    .order_by(DBToolOutcome.created_at.asc(), DBToolOutcome.id.asc())
+                )
+                outcomes = list(result.all())
+                lifecycle.state, lifecycle.reason = decide_lifecycle_state(
+                    lifecycle.state, outcomes
+                )
+                lifecycle.updated_at = datetime.now(timezone.utc)
+                tool = await session.get(DBTool, execution.tool_id)
+                response = {
+                    "tool_name": tool.name if tool else "unknown",
+                    "execution_id": execution.id,
+                    "state": lifecycle.state,
+                    "reason": lifecycle.reason,
+                    "outcome_count": len(outcomes),
+                }
+            await session.commit()
+            return response
+
+    async def get_lifecycle(self, name: str) -> dict | None:
+        async with self.session_factory() as session:
+            tool_result = await session.execute(
+                select(DBTool).where(DBTool.name == name)
+            )
+            tool = tool_result.scalar_one_or_none()
+            if tool is None:
+                return None
+            lifecycle = await session.get(DBToolLifecycle, tool.id)
+            return {
+                "tool_name": name,
+                "state": lifecycle.state if lifecycle else "shared",
+                "reason": (
+                    lifecycle.reason
+                    if lifecycle
+                    else "Existing tool has legacy shared status"
+                ),
+            }
+
+    async def set_lifecycle_state(self, name: str, state: str, reason: str) -> bool:
+        if state not in {"candidate", "quarantined", "retired"}:
+            raise ValueError("Unsupported lifecycle state")
+        async with self.session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(DBTool).where(DBTool.name == name)
+                )
+                tool = result.scalar_one_or_none()
+                if tool is None:
+                    return False
+                lifecycle = await session.get(DBToolLifecycle, tool.id)
+                if lifecycle is None:
+                    lifecycle = DBToolLifecycle(
+                        tool_id=tool.id, state=state, reason=reason
+                    )
+                    session.add(lifecycle)
+                else:
+                    lifecycle.state = state
+                    lifecycle.reason = reason
+                    lifecycle.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            return True

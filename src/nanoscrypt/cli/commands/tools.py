@@ -27,6 +27,7 @@ def list_cmd(query: str = typer.Option("", help="Search query filter")):
         table.add_column("Version", style="magenta")
         table.add_column("Success Rate", style="yellow")
         table.add_column("Usage Count", style="blue")
+        table.add_column("Lifecycle", style="magenta")
         table.add_column("Status", style="red")
 
         for t in tools:
@@ -36,6 +37,7 @@ def list_cmd(query: str = typer.Option("", help="Search query filter")):
                 str(t.current_version),
                 f"{t.success_rate * 100:.1f}%",
                 str(t.usage_count),
+                (await registry.get_lifecycle(t.name) or {}).get("state", "shared"),
                 t.status,
             )
         console.print(table)
@@ -56,6 +58,7 @@ def inspect_cmd(name: str):
             console.print(f"[red]Tool '{name}' not found or inactive.[/red]")
             raise typer.Exit(code=1)
 
+        lifecycle = await registry.get_lifecycle(name)
         details = (
             f"[bold]Name:[/bold] {t.name}\n"
             f"[bold]Purpose:[/bold] {t.purpose}\n"
@@ -64,6 +67,8 @@ def inspect_cmd(name: str):
             f"[bold]Success Rate:[/bold] {t.success_rate * 100:.1f}%\n"
             f"[bold]Usage Count:[/bold] {t.usage_count}\n"
             f"[bold]Status:[/bold] {t.status}\n"
+            f"[bold]Lifecycle:[/bold] {(lifecycle or {}).get('state', 'shared')} — "
+            f"{(lifecycle or {}).get('reason', 'Legacy tool')}\n"
             f"[bold]Created At:[/bold] {t.created_at.isoformat()}"
         )
         console.print(
@@ -90,3 +95,33 @@ def delete_cmd(name: str):
     from nanoscrypt.utils.async_runner import run_sync
 
     run_sync(async_delete())
+
+
+@tools_app.command("outcome")
+def outcome_cmd(
+    execution_id: int = typer.Argument(..., help="Execution ID returned by nanoscrypt run"),
+    task_key: str = typer.Option(..., help="Stable key for this task family"),
+    contribution: str = typer.Option(..., help="helpful, neutral, or harmful"),
+    evidence: str = typer.Option(..., help="Short explanation supporting the rating"),
+):
+    """Record task-level evidence for a tool execution."""
+
+    async def async_record():
+        if contribution not in {"helpful", "neutral", "harmful"}:
+            console.print("[red]Contribution must be helpful, neutral, or harmful.[/red]")
+            raise typer.Exit(code=2)
+        registry = await get_registry()
+        result = await registry.record_outcome(
+            execution_id, task_key, contribution, evidence
+        )
+        if result is None:
+            console.print("[red]Execution ID not found.[/red]")
+            raise typer.Exit(code=1)
+        console.print(
+            f"[green]{result['tool_name']}[/green]: lifecycle is "
+            f"[bold]{result['state']}[/bold] — {result['reason']}"
+        )
+
+    from nanoscrypt.utils.async_runner import run_sync
+
+    run_sync(async_record())

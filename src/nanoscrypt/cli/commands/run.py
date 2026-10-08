@@ -127,7 +127,8 @@ class FileCompleter(Completer):
         scored_matches.sort(key=lambda item: (item[0], item[1]))
 
         for score, rel_path, base_name in scored_matches:
-            display_meta = f"Workspace File: {rel_path}"
+            parent = Path(rel_path).parent.as_posix()
+            display_meta = "project root" if parent == "." else parent
             yield Completion(
                 rel_path,
                 start_position=-len(word_to_match),
@@ -196,6 +197,9 @@ def run_cmd(
     allow_web: bool = typer.Option(
         False, help="Explicitly enable web access for this run"
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show internal diagnostic logs"
+    ),
 ):
     """Executes a task prompt or enters an interactive REPL developer session using the Nanoscrypt orchestrator."""
     sess_id = session_id or f"cli_{uuid.uuid4().hex[:8]}"
@@ -204,7 +208,9 @@ def run_cmd(
         from nanoscrypt.cli.setup import ensure_user_configured
         from nanoscrypt.logging import setup_logging
 
-        setup_logging()
+        # Keep internal planner/context logs out of the user-facing terminal by
+        # default. They can include full prompts and are available with --verbose.
+        setup_logging("INFO" if verbose else "WARNING")
 
         # Prompt user to configure API key & provider on first start if not configured
         if ensure_user_configured(interactive=True):
@@ -213,7 +219,14 @@ def run_cmd(
 
         # Initialize dependencies
         orchestrator = await get_orchestrator()
-        session = Session(id=sess_id, workspace_path=f"./workspaces/{sess_id}")
+        from nanoscrypt.core.session_store import SessionStore
+
+        session_store = SessionStore(settings.runtime.workspace_root)
+        session = session_store.load(sess_id) or Session(
+            id=sess_id,
+            workspace_path=str(Path(settings.runtime.workspace_root) / sess_id),
+        )
+        session_store.save(session)
         meter = Meter(orchestrator)
 
         # Build custom agent if args specified
@@ -247,22 +260,24 @@ def run_cmd(
 
         capsem_active = getattr(settings.runtime, "capsem_enabled", False) and bool(shutil.which("capsem"))
         if getattr(settings.runtime, "capsem_enabled", False):
-            sandbox_lbl = "Capsem" if capsem_active else "Process Isolation"
+            sandbox_lbl = "CapSem" if capsem_active else "CapSem unavailable (execution blocked)"
         else:
             sandbox_lbl = "Disabled"
 
         console.print()
         console.print(
             Align.center(
-                Panel(
+                Panel.fit(
                     Text.assemble(
-                        ("Nanoscrypt ", "cyan bold"),
-                        ("- Live Execution Runtime v0.2.0\n", "dim"),
-                        (f"Session: {sess_id} | Agent: {active_agent.name if active_agent else 'Default orchestrator'} | Sandbox: {sandbox_lbl}", "yellow"),
+                        ("Agent  ", "dim"),
+                        (f"{active_agent.name if active_agent else 'Default agent'}", "white bold"),
+                        ("\nSandbox  ", "dim"),
+                        (sandbox_lbl, "yellow"),
                     ),
-                    subtitle=f"Session: {sess_id} | Agent: {active_agent.name if active_agent else 'Default orchestrator'} | Sandbox: {sandbox_lbl}",
+                    title="[bold cyan]NANOSCRYPT[/bold cyan]",
+                    subtitle=f"session {sess_id}",
                     border_style="cyan",
-                    padding=(0, 2),
+                    padding=(1, 2),
                 )
             )
         )
@@ -274,13 +289,16 @@ def run_cmd(
             user_name = prof.get("name", os.getlogin() or "GuestDeveloper")
         except Exception:
             user_name = os.getlogin() or "GuestDeveloper"
-        console.print(f"[blue]•[/blue] Signed in successfully as [bold]{user_name}[/bold]!")
+        console.print(
+            f"[green]●[/green] Ready for [bold]{user_name}[/bold]  "
+            f"[dim]· {settings.llm.model}[/dim]"
+        )
 
         if hasattr(orchestrator, "mcp_manager"):
             for s_name in orchestrator.mcp_manager.servers.keys():
-                console.print(f"[blue]•[/blue] {s_name} MCP Server: Connected")
+                console.print(f"[dim]↳ {s_name} connected[/dim]")
             if orchestrator.mcp_manager.servers:
-                console.print(f"[blue]•[/blue] MCP Servers reloaded: {len(orchestrator.mcp_manager.servers)} server connected")
+                console.print(f"[dim]{len(orchestrator.mcp_manager.servers)} tool server(s) ready[/dim]")
         console.print()
 
         async def execute_prompt(user_prompt: str):
@@ -289,7 +307,13 @@ def run_cmd(
             stats_before = meter.get_stats()
             
             # Setup harness
-            harness = AgentHarness(orchestrator, session, active_agent)
+            harness = AgentHarness(
+                orchestrator,
+                session,
+                active_agent,
+                max_turns=settings.runtime.max_agent_turns,
+                session_store=session_store,
+            )
 
             # Setup interactive console approval handler
             def cli_approval_callback(req: ApprovalRequest) -> bool:
@@ -333,36 +357,46 @@ def run_cmd(
 
             # Event listener for real-time progress events
             has_printed_response_header = False
-            has_printed_thought_header = False
-            import time
-            prompt_start_time = time.time()
+            status = console.status("Thinking…", spinner="dots")
+            status.start()
+            status_active = True
 
             def event_listener(event):
-                nonlocal has_printed_response_header, has_printed_thought_header
+                nonlocal has_printed_response_header, status_active
                 if event.type == "thinking_delta":
-                    if not has_printed_thought_header:
-                        elapsed = max(1, int(time.time() - prompt_start_time))
-                        console.print(f"\n[bold green]v Thought for {elapsed}s[/bold green]")
-                        has_printed_thought_header = True
-                    console.print(f"[dim italic]{event.delta}[/dim italic]")
+                    # Never render planner reasoning in the terminal. It is
+                    # internal control data, not user-facing progress.
+                    status.update("Thinking…")
+                elif event.type == "progress":
+                    status.update(event.message)
                 elif event.type == "tool_execution_start":
-                    console.print(f"\n[dim]⚒ Executing tool: [bold]{event.tool_name}[/bold]...[/dim]")
+                    status.update(f"Running {event.tool_name}…")
                 elif event.type == "tool_execution_end":
-                    status_str = "[green]Success[/green]" if event.success else "[red]Failed[/red]"
-                    console.print(f"[dim]⚒ Tool execution completed: {status_str}[/dim]")
+                    status.stop()
+                    status_active = False
+                    status_str = "[green]completed[/green]" if event.success else "[red]failed[/red]"
+                    console.print(f"  [dim]Tool {event.tool_name} {status_str}[/dim]")
                     if event.error:
                         console.print(f"[red]Error: {event.error}[/red]")
                 elif event.type == "message_start":
-                    console.print("\n[blue]•[/blue] ", end="")
+                    if status_active:
+                        status.stop()
+                        status_active = False
+                    console.print("\n[bold green]Nanoscrypt[/bold green] ", end="")
                     has_printed_response_header = True
                 elif event.type == "message_delta":
-                    console.print(event.delta, end="")
+                    console.print(event.delta, end="", markup=False, highlight=False)
+                    console.file.flush()
 
             harness.subscribe(event_listener)
 
             # Execute via the harness prompt stream
-            async for _ in harness.prompt(user_prompt):
-                pass
+            try:
+                async for _ in harness.prompt(user_prompt):
+                    pass
+            finally:
+                if status_active:
+                    status.stop()
                 
             # Retrieve final result structure
             result = harness.last_result or {}
@@ -374,15 +408,16 @@ def run_cmd(
                 # Only print the response if it was not already streamed live
                 if not has_printed_response_header:
                     if "\n" in output_content or "#" in output_content or "`" in output_content:
-                        console.print("[blue]•[/blue] ")
+                        console.print("[bold green]Nanoscrypt[/bold green]")
                         console.print(Markdown(output_content))
                     else:
-                        console.print(f"[blue]•[/blue] {output_content}")
+                        console.print(f"[bold green]Nanoscrypt[/bold green] {output_content}")
 
                 if result.get("tool_name"):
                     console.print(
                         f" [dim]tool: [bold]{result.get('tool_name')}[/bold] (v{result.get('version')}) "
-                        f"• duration: {result.get('runtime_ms')}ms[/dim]"
+                        f"• duration: {result.get('runtime_ms')}ms "
+                        f"• execution: {result.get('execution_id')}[/dim]"
                     )
             elif result.get("status") == "clarification_needed":
                 if not has_printed_response_header:
@@ -419,9 +454,15 @@ def run_cmd(
                     )
                 )
             else:
+                error_detail = str(result.get("error") or "Unknown error occurred")
+                if result.get("execution_id") is not None:
+                    error_detail += (
+                        f"\n\nExecution ID for tool-outcome feedback: "
+                        f"{result['execution_id']}"
+                    )
                 console.print(
                     Panel(
-                        str(result.get("error") or "Unknown error occurred"),
+                        error_detail,
                         title="[bold red]Execution Failed[/bold red]",
                         border_style="red",
                         padding=(1, 2),
@@ -433,8 +474,8 @@ def run_cmd(
             in_diff = stats_after["input_tokens"] - stats_before["input_tokens"]
             out_diff = stats_after["output_tokens"] - stats_before["output_tokens"]
             console.print(
-                f"  [dim]turn cost: ${spent:.5f} (in {in_diff} | out {out_diff})  ·  "
-                f"total cost: {meter.status()}[/dim]"
+                f"[dim]  turn ${spent:.5f}  ·  in {in_diff:,} / out {out_diff:,} tokens  ·  "
+                f"session total ${stats_after['cost']:.5f}[/dim]"
             )
 
         def handle_slash(command_line: str) -> bool:
@@ -559,6 +600,8 @@ def run_cmd(
                 return True
             elif cmd == "/clear":
                 session.history.clear()
+                session.conversation_history.clear()
+                session_store.save(session)
                 console.print("  [dim]Session history cleared.[/dim]")
                 return True
             elif cmd == "/history":
@@ -583,7 +626,13 @@ def run_cmd(
 
         # One-shot mode vs Interactive REPL mode
         if prompt:
-            console.print(f"[bold cyan]USER REQUEST:[/bold cyan] {prompt}")
+            console.print(
+                Panel.fit(
+                    Text(prompt),
+                    title="[bold blue]You[/bold blue]",
+                    border_style="blue",
+                )
+            )
             console.print()
             await execute_prompt(prompt)
         else:
@@ -591,15 +640,22 @@ def run_cmd(
             
             completer = FileCompleter(Path("."))
             style = Style.from_dict({
-                'prompt': 'bold #3498db',
-                'bottom-toolbar': 'bg:#1e272e #ffffff',
+                "prompt": "bold #38BDF8",
+                "bottom-toolbar": "bg:#0F172A #CBD5E1",
+                "completion-menu": "bg:#111827 #E2E8F0",
+                "completion-menu.completion": "bg:#111827 #CBD5E1",
+                "completion-menu.completion.current": "bg:#2563EB #FFFFFF bold",
+                "completion-menu.meta": "bg:#111827 #94A3B8",
+                "completion-menu.meta.current": "bg:#2563EB #DBEAFE",
+                "scrollbar.background": "bg:#1F2937",
+                "scrollbar.button": "bg:#64748B",
             })
 
             def get_bottom_toolbar():
                 stats = meter.get_stats()
                 cwd_name = Path(".").resolve().name
                 model_name = settings.llm.model
-                return f"  D:\\dev\\personal\\{cwd_name}  ·  Session: {stats['cost']:.5f} AIC used  ·  Auto -> {model_name}  ·  ctrl+c exit"
+                return f"  {cwd_name}  ·  ${stats['cost']:.5f}  ·  {model_name}  ·  Ctrl+C to cancel"
 
             use_prompt_toolkit = True
             try:

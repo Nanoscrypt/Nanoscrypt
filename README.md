@@ -159,6 +159,34 @@ Interactive OpenAPI documentation is hosted at `http://127.0.0.1:8000/docs`.
 - `GET /api/v1/approvals/pending` — List human-in-the-loop authorization gates.
 - `GET /api/v1/audit/summary` — Aggregate cost, token counts, and execution metrics.
 
+### Generated Tool Lifecycle
+
+Newly generated tools begin as **candidates** and are excluded from future agent tool discovery. A clean process exit records execution health, but does not count as evidence that a tool helped complete its task. Existing registry entries without lifecycle records remain available as shared tools.
+
+An API client can submit explicit contribution feedback for a completed execution:
+
+```http
+POST /api/v1/tools/outcomes
+Content-Type: application/json
+
+{
+  "execution_id": 42,
+  "task_key": "xml-to-json-conversion",
+  "contribution": "helpful",
+  "evidence": "The requested XML fields were converted and verified in the output."
+}
+```
+
+The contribution must be `helpful`, `neutral`, or `harmful`. Use a stable task key for each distinct task family. Candidate tools become shared after at least five reviews across three distinct task keys, with at least 80% marked helpful. Repeated harmful feedback moves a candidate to quarantine or a shared tool to review. The current state and reason are available from `GET /api/v1/tools/{name}/lifecycle`; `PUT` on that path lets an operator quarantine, retire, or return a tool to candidate review. Only accumulated outcome evidence can promote a tool to shared. Lifecycle evidence applies to a specific tool version.
+
+Task responses include `execution_id` so clients can attach outcome feedback. Feedback is optional; until enough evidence is supplied, a new tool remains available for its generating run but is not offered for reuse in later plans.
+
+For the CLI, `nanoscrypt run` displays the execution ID. Record feedback with:
+
+```bash
+nanoscrypt tools outcome 42 --task-key xml-to-json-conversion --contribution helpful --evidence "Verified the converted fields against the requested output."
+```
+
 ---
 
 ##  Configuration
@@ -178,6 +206,7 @@ max_output_tokens = 4096
 
 [runtime]
 timeout_seconds = 60
+max_agent_turns = 12
 max_memory_mb = 512
 workspace_root = "./workspaces"
 
@@ -190,6 +219,12 @@ approval_mode = "interactive"
 default_risk_threshold = "medium"
 max_file_write_mb = 10
 ```
+
+### Harness sessions
+
+The harness runs bounded turns, carries recent conversation into queued follow-ups, and saves session messages and tool history under `.nanoscrypt_sessions/` inside the configured workspace root. Reuse a session with `nanoscrypt run --session-id <id> "..."`; `/clear` clears its saved conversation and tool history. The default turn limit is 12 and can be changed with `runtime.max_agent_turns`.
+
+Cancellation can stop active generated-tool and code-agent subprocesses; dependency installation and application-launch processes do not yet share this cancellation path. CapSem is optional; when explicitly enabled but unavailable, generated-tool and code-agent execution are blocked instead of silently falling back. CapSem is not currently applied to application launches. Process isolation and a virtual environment alone are not a security sandbox, and the current `max_memory_mb` setting is not enforced by the runtime.
 
 ---
 

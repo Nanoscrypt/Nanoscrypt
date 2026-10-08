@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 import structlog
 from typing import Any, Dict, List, Optional
@@ -56,13 +57,19 @@ class CodeAgentExecutor:
     def __init__(self, orchestrator: Any):
         self.orchestrator = orchestrator
 
-    async def execute(self, user_prompt: str, session: Session, active_agent: Any) -> Dict[str, Any]:
+    async def execute(
+        self,
+        user_prompt: str,
+        session: Session,
+        active_agent: Any,
+        cancellation_event: threading.Event | None = None,
+    ) -> Dict[str, Any]:
         """Executes the main Thought-Code-Observation loop."""
         log = logger.bind(component="code_agent", session_id=session.id)
         log.info("code_agent_loop_started")
 
         # 1. Fetch and document all available tools from registry for the system prompt
-        all_tools = await self.orchestrator.registry.search("")
+        all_tools = await self.orchestrator.registry.search("", shared_only=True)
         mcp_tools = []
         if hasattr(self.orchestrator, "mcp_manager"):
             for s_name, s_client in self.orchestrator.mcp_manager.servers.items():
@@ -100,6 +107,8 @@ class CodeAgentExecutor:
         system_prompt = CODE_AGENT_SYSTEM_PROMPT.format(tools_doc=tools_doc)
 
         for iteration in range(1, max_iterations + 1):
+            if cancellation_event is not None and cancellation_event.is_set():
+                return {"status": "cancelled", "error": "Execution cancelled."}
             log.info("code_agent_iteration_started", iteration=iteration)
 
             # Construct message context
@@ -152,8 +161,12 @@ class CodeAgentExecutor:
             obs, final_result, term = await self._run_sandbox_code(
                 code=code,
                 session=session,
-                state_file_content=state_file_content
+                state_file_content=state_file_content,
+                cancellation_event=cancellation_event,
             )
+
+            if cancellation_event is not None and cancellation_event.is_set():
+                return {"status": "cancelled", "error": "Execution cancelled."}
 
             if term:
                 log.info("code_agent_loop_completed", success=True)
@@ -169,16 +182,25 @@ class CodeAgentExecutor:
         log.warning("code_agent_max_iterations_reached")
         return {"status": "failed", "error": "Max iterations reached without calling final_answer()"}
 
-    def _dispatch_tool_sync(self, tool_name: str, args: dict, session: Session, loop: asyncio.AbstractEventLoop) -> tuple[Any, bool]:
+    def _dispatch_tool_sync(
+        self,
+        tool_name: str,
+        args: dict,
+        session: Session,
+        loop: asyncio.AbstractEventLoop,
+        cancellation_event: threading.Event | None = None,
+    ) -> tuple[Any, bool]:
         """Dispatches tool execution synchronously from the background thread to the main event loop."""
         async def _dispatch():
             target_tool = await self.orchestrator.registry.get(tool_name)
             if target_tool:
                 self.orchestrator.runtime_manager.setup_workspace(session.id, target_tool)
-                exec_res = self.orchestrator.runtime_manager.execute_tool(
+                exec_res = await asyncio.to_thread(
+                    self.orchestrator.runtime_manager.execute_tool,
                     session_id=session.id,
                     input_data=json.dumps(args),
                     requirements=target_tool.requirements,
+                    cancellation_event=cancellation_event,
                 )
                 if exec_res.return_code == 0:
                     wrapped_out = json.loads(exec_res.stdout.strip())
@@ -201,13 +223,30 @@ class CodeAgentExecutor:
         future = asyncio.run_coroutine_threadsafe(_dispatch(), loop)
         return future.result()
 
-    async def _run_sandbox_code(self, code: str, session: Session, state_file_content: List[str]) -> tuple[str, Any, bool]:
+    async def _run_sandbox_code(
+        self,
+        code: str,
+        session: Session,
+        state_file_content: List[str],
+        cancellation_event: threading.Event | None = None,
+    ) -> tuple[str, Any, bool]:
         """Runs the LLM code block inside the isolated RuntimeManager, handling stdio RPC requests."""
+        if settings.runtime.capsem_enabled:
+            import shutil
+
+            if not shutil.which("capsem"):
+                return (
+                    "CapSem is enabled but unavailable; code execution was blocked.",
+                    None,
+                    True,
+                )
         workspace = self.orchestrator.runtime_manager.get_session_workspace(session.id)
+        if cancellation_event is not None and cancellation_event.is_set():
+            return "Execution cancelled.", None, False
         os.makedirs(workspace, exist_ok=True)
 
         # 1. Fetch and document all available tools from registry
-        all_tools = await self.orchestrator.registry.search("")
+        all_tools = await self.orchestrator.registry.search("", shared_only=True)
         mcp_tools = []
         if hasattr(self.orchestrator, "mcp_manager"):
             for s_name, s_client in self.orchestrator.mcp_manager.servers.items():
@@ -304,8 +343,10 @@ import tool
         # Wrap in CAPSEM if active
         if settings.runtime.capsem_enabled:
             import shutil
-            if shutil.which("capsem"):
-                cmd = ["capsem"] + cmd
+
+            capsem_path = shutil.which("capsem")
+            if capsem_path:
+                cmd = [capsem_path] + cmd
 
         project_root = Path(".").resolve()
         env = dict(os.environ)
@@ -317,14 +358,20 @@ import tool
         import subprocess
         import concurrent.futures
 
+        process_options = {}
+        if os.name == "nt":
+            process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            process_options["start_new_session"] = True
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            cwd=str(project_root),
+            cwd=str(workspace),
             env=env,
+            **process_options,
         )
 
         stdout_accum = []
@@ -356,7 +403,9 @@ import tool
                             tool_name = req.get("name")
                             args = req.get("arguments", {})
 
-                            out_val, is_err = self._dispatch_tool_sync(tool_name, args, session, loop)
+                            out_val, is_err = self._dispatch_tool_sync(
+                                tool_name, args, session, loop, cancellation_event
+                            )
                             if is_err:
                                 process.stdin.write((json.dumps({"status": "error", "error": out_val}) + "\n"))
                             else:
@@ -369,8 +418,24 @@ import tool
                 stderr_accum.append(f"RPC communication failed: {e}")
             return final_val, term
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            final_answer_value, terminated = await loop.run_in_executor(executor, _sync_loop)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        sync_future = loop.run_in_executor(executor, _sync_loop)
+        try:
+            while not sync_future.done():
+                if cancellation_event is not None and cancellation_event.is_set():
+                    self.orchestrator.runtime_manager._stop_process(process)
+                    break
+                await asyncio.sleep(0.05)
+            final_answer_value, terminated = await sync_future
+        except asyncio.CancelledError:
+            self.orchestrator.runtime_manager._stop_process(process)
+            raise
+        finally:
+            if process.poll() is None:
+                self.orchestrator.runtime_manager._stop_process(process)
+            await asyncio.to_thread(
+                executor.shutdown, wait=True, cancel_futures=True
+            )
 
         # Kill process if still running
         if process.poll() is None:

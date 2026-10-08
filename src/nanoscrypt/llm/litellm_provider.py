@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import re
 from typing import Any
@@ -118,6 +119,53 @@ class LiteLLMProvider(LLMProvider):
         if "timeout" not in kwargs:
             kwargs["timeout"] = 1800.0
         self._inject_llm_credentials(kwargs)
+
+        # Only stream user-facing text when a callback is explicitly provided.
+        # Internal planner/generator calls continue to receive a normal response.
+        stream_callback = kwargs.pop("stream_callback", None)
+        if stream_callback is not None:
+            response_stream = await self._execute_with_retry(
+                litellm.acompletion,
+                model=model,
+                messages=messages,
+                temperature=temp,
+                max_tokens=tokens,
+                stream=True,
+                **kwargs,
+            )
+            response_parts: list[str] = []
+            usage = None
+            async for chunk in response_stream:
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                content = getattr(delta, "content", None) if delta else None
+                if not isinstance(content, str) or not content:
+                    continue
+                response_parts.append(content)
+                callback_result = stream_callback(content)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+
+            response_text = "".join(response_parts)
+            self.last_input_tokens = (
+                usage.prompt_tokens if usage and usage.prompt_tokens is not None
+                else self.count_tokens(prompt, model)
+            )
+            self.last_output_tokens = (
+                usage.completion_tokens if usage and usage.completion_tokens is not None
+                else self.count_tokens(response_text, model)
+            )
+            self.total_input_tokens += self.last_input_tokens
+            self.total_output_tokens += self.last_output_tokens
+            self.last_cost = self.estimate_cost(
+                self.last_input_tokens, self.last_output_tokens, model
+            )
+            self.total_cost += self.last_cost
+            return response_text
 
         response = await self._execute_with_retry(
             litellm.acompletion,

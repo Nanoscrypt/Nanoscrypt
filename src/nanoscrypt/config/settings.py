@@ -24,6 +24,7 @@ class LLMSettings(BaseModel):
 
 class RuntimeSettings(BaseModel):
     timeout_seconds: int = 90
+    max_agent_turns: int = 12
     max_memory_mb: int = 512
     cleanup_after: bool = True
     workspace_root: str = "./workspaces"

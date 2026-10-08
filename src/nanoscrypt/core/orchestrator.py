@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from typing import Any
 
 import structlog
@@ -81,6 +82,34 @@ class Orchestrator:
         from nanoscrypt.core.similarity import SimilarityMatcher
         self.tool_mutator = ToolMutator(llm=self.generator.llm)
         self.similarity_matcher = SimilarityMatcher()
+
+    async def _execute_tool_cancellable(
+        self,
+        session_id: str,
+        input_data: str,
+        requirements: list[str],
+        cancellation_event: threading.Event | None,
+    ) -> ExecutionResult:
+        """Run the blocking tool runtime off-loop and await process cleanup on cancel."""
+        cancel_event = cancellation_event or threading.Event()
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                self.runtime_manager.execute_tool,
+                session_id=session_id,
+                input_data=input_data,
+                requirements=requirements,
+                cancellation_event=cancel_event,
+            )
+        )
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancel_event.set()
+            try:
+                await asyncio.shield(worker)
+            except Exception:
+                pass
+            raise
 
     async def _extract_parameters(
         self, user_prompt: str, input_schema: dict, agent_name: str, session_id: str
@@ -195,6 +224,9 @@ class Orchestrator:
         session: Session,
         agent: Agent | None = None,
         pre_execute_hook=None,
+        cancellation_event: threading.Event | None = None,
+        stream_callback=None,
+        progress_callback=None,
     ) -> dict[str, Any]:
         """Executes a task under the context of an Agent, running hooks, memory retrieval, guardrails, and approvals."""
 
@@ -210,6 +242,13 @@ class Orchestrator:
             session_id=session.id, agent=active_agent.name, role=active_agent.role.value
         )
         log.info("orchestrator_task_execution_started", prompt=user_prompt)
+
+        async def report_progress(message: str) -> None:
+            if progress_callback is None:
+                return
+            result = progress_callback(message)
+            if hasattr(result, "__await__"):
+                await result
 
         # Check for Prefix Commands
         from nanoscrypt.core.command_router import PrefixCommandRouter
@@ -229,13 +268,42 @@ class Orchestrator:
                     "error": f"Unknown special command: '{payload}'. Available special commands: //TODO, //inject, //confluence"
                 }
 
+        # Avoid a full planner + LLM round trip for common conversational openers.
+        # The CLI can return these immediately without waiting on a model endpoint.
+        import re
+
+        latest_request = user_prompt.rsplit("Current user request:\n", 1)[-1].strip()
+        normalized_request = re.sub(
+            r"[^\w\s']", "", latest_request.lower()
+        ).strip()
+        greeting_requests = {
+            "hi", "hello", "hey", "howdy", "yo", "sup",
+            "good morning", "good afternoon", "good evening",
+            "thanks", "thank you", "bye", "goodbye",
+        }
+        greeting = normalized_request.removesuffix(" nanoscrypt")
+        if greeting in greeting_requests:
+            response = (
+                "Hello! How can I help?"
+                if greeting not in {"thanks", "thank you"}
+                else "You’re welcome!"
+            )
+            return {
+                "status": "completed",
+                "action_taken": "direct_response",
+                "response": response,
+            }
+
         # Route to CodeAgentExecutor if enabled
         if settings.runtime.code_agent_enabled:
             from nanoscrypt.core.code_agent import CodeAgentExecutor
             executor = CodeAgentExecutor(self)
-            return await executor.execute(user_prompt, session, active_agent)
+            return await executor.execute(
+                user_prompt, session, active_agent, cancellation_event
+            )
 
         # 1. Fire BEFORE_PLAN Lifecycle Hook
+        await report_progress("Gathering project context…")
         hook_context = {
             "session": session,
             "prompt": user_prompt,
@@ -259,7 +327,7 @@ class Orchestrator:
             )
 
         # 3. Search existing tools in registry for context assembly
-        all_tools = await self.registry.search("")
+        all_tools = await self.registry.search("", shared_only=True)
         serialized_tools = []
         for t in all_tools:
             serialized_tools.append(
@@ -384,10 +452,24 @@ class Orchestrator:
             "run",
             "reuse",
         ]
-        prompt_lower = user_prompt.lower()
+        prompt_lower = latest_request.lower()
         has_action_intent = any(kw in prompt_lower for kw in action_keywords)
+        question_starters = (
+            "who ", "what ", "when ", "where ", "why ", "how ",
+            "is ", "are ", "am ", "do ", "does ", "did ",
+            "can ", "could ", "would ", "will ", "should ",
+            "have ", "has ", "tell me ",
+        )
+        is_natural_language_question = (
+            user_prompt.rstrip().endswith("?")
+            or prompt_lower.startswith(question_starters)
+        )
         is_explain_query = (
-            (any(kw in prompt_lower for kw in explain_keywords) or ("@" in user_prompt and not has_action_intent))
+            (
+                any(kw in prompt_lower for kw in explain_keywords)
+                or is_natural_language_question
+                or ("@" in latest_request and not has_action_intent)
+            )
             and not has_action_intent
         )
 
@@ -412,6 +494,7 @@ class Orchestrator:
                 user_prompt=user_prompt,
                 registered_tools=serialized_tools,
             )
+            await report_progress("Planning the task…")
             decision = await self.planner.decide(assembled_prompt)
 
             # If planner chose generate_tool but a high-scoring evolution candidate exists, elevate to evolve_tool
@@ -481,6 +564,7 @@ class Orchestrator:
 
         if decision.action == "direct_response":
             resp_val = decision.response
+            streamed_response = False
             if not resp_val or resp_val == decision.reasoning:
                 system_prompt = (
                     "You are Nanoscrypt, an expert AI software assistant. "
@@ -498,9 +582,14 @@ class Orchestrator:
                             clean_prompt += f"--- Content of {match} ---\n{p.read_text(encoding='utf-8', errors='replace')[:10000]}\n\n"
 
                 try:
+                    await report_progress("Writing the response…")
                     resp_val = await self.planner.llm.generate(
-                        prompt=clean_prompt, system_prompt=system_prompt, timeout=1800.0
+                        prompt=clean_prompt,
+                        system_prompt=system_prompt,
+                        timeout=1800.0,
+                        stream_callback=stream_callback,
                     )
+                    streamed_response = stream_callback is not None
                 except Exception as e:
                     # Provide local fallback if LLM generation times out or fails
                     file_summaries = []
@@ -526,6 +615,7 @@ class Orchestrator:
                 "action_taken": "direct_response",
                 "response": resp_val,
                 "reasoning": decision.reasoning,
+                "streamed": streamed_response,
             }
 
         if decision.action == "clarify":
@@ -696,6 +786,7 @@ class Orchestrator:
                     is_evolution = False
             else:
                 # Generate new tool from scratch
+                await report_progress("Creating the requested tool…")
                 target_tool = await self.generator.generate(decision, user_prompt=user_prompt)
 
             # Post-process: auto-fix common LLM code issues
@@ -722,6 +813,7 @@ class Orchestrator:
             )
 
             # Validate tool with policies
+            await report_progress("Checking the tool for safety…")
             val_result = self.validator.validate(target_tool)
             if not val_result.is_valid:
                 errors = [
@@ -739,6 +831,7 @@ class Orchestrator:
                 )
 
                 if self.repair_loop:
+                    await report_progress("Repairing a validation issue…")
                     log.info(
                         "orchestrator_triggering_repair_loop_on_validation_failure"
                     )
@@ -893,6 +986,7 @@ class Orchestrator:
                 }
 
         # 10. Execute Tool inside Runtime Sandbox
+        await report_progress("Running the tool in its workspace…")
         log.info("orchestrator_setting_up_runtime", tool_name=tool_name)
 
         # Fire BEFORE_EXECUTE Hook
@@ -912,10 +1006,11 @@ class Orchestrator:
             session_id=session.id,
         )
 
-        exec_res = self.runtime_manager.execute_tool(
+        exec_res = await self._execute_tool_cancellable(
             session_id=session.id,
             input_data=tool_input,
-            requirements=target_tool.requirements,
+            requirements=target_tool.requirements or [],
+            cancellation_event=cancellation_event,
         )
         
         json_error = None
@@ -936,7 +1031,8 @@ class Orchestrator:
         success = exec_res.return_code == 0 and not exec_res.timed_out and not json_error
 
         # Self-repair logic
-        if not success and self.repair_loop:
+        if not success and self.repair_loop and not exec_res.cancelled:
+            await report_progress("Repairing a failed tool run…")
             log.warning(
                 "orchestrator_execution_failed_triggering_repair_loop",
                 error=exec_res.stderr,
@@ -990,10 +1086,11 @@ class Orchestrator:
                     session_id=session.id,
                 )
 
-                exec_res = self.runtime_manager.execute_tool(
+                exec_res = await self._execute_tool_cancellable(
                     session_id=session.id,
                     input_data=tool_input,
-                    requirements=target_tool.requirements,
+                    requirements=target_tool.requirements or [],
+                    cancellation_event=cancellation_event,
                 )
                 
                 json_error = None
@@ -1026,7 +1123,7 @@ class Orchestrator:
             error_msg = exec_res.stderr or f"Exit code: {exec_res.return_code}"
 
         # 11. Update database metrics and session run records
-        await self.registry.update_stats(
+        execution_id = await self.registry.update_stats(
             tool_name=tool_name,
             success=success,
             runtime_ms=exec_res.runtime_ms,
@@ -1096,6 +1193,7 @@ class Orchestrator:
             "output": output_data,
             "error": error_msg,
             "runtime_ms": exec_res.runtime_ms,
+            "execution_id": execution_id,
             "reasoning": getattr(decision, "reasoning", None),
             "response": getattr(decision, "response", None),
         }

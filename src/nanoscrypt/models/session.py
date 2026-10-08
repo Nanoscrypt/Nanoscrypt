@@ -19,4 +19,5 @@ class Session(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     active_prompt: str | None = None
     active_agent: str | None = None  # Tracks the active agent executing tasks
+    conversation_history: list[dict[str, str]] = Field(default_factory=list)
     history: list[SessionToolOutput] = Field(default_factory=list)

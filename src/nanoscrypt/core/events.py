@@ -24,6 +24,13 @@ class TurnEndEvent(AgentEvent):
     turn: int
 
 
+class ProgressEvent(AgentEvent):
+    """A concise, user-safe description of the current execution stage."""
+
+    type: Literal["progress"] = "progress"
+    message: str
+
+
 class MessageStartEvent(AgentEvent):
     type: Literal["message_start"] = "message_start"
     message_role: str

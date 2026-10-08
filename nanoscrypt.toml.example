@@ -9,6 +9,7 @@ token_budget = 0
 
 [runtime]
 timeout_seconds = 30
+max_agent_turns = 12
 max_memory_mb = 512
 cleanup_after = true
 workspace_root = "./workspaces"
