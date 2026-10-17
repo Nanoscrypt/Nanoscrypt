@@ -31,6 +31,7 @@ Remember:
 - When defining `tool_purpose`, explicitly mention the file format so the tool generator knows exactly what parsing library to use (e.g., "Parse a PDF file to...").
 - When generating a new tool for a specific binary file format or framework, YOU MUST add ONLY valid Python PyPI packages to `dependencies_hint` (e.g., "flask", "pymupdf", "python-docx", "openpyxl"). NEVER include front-end libraries (e.g., "bootstrap", "tailwind", "react", "vue") or invalid package names in `dependencies_hint`.
 
-Your response must strictly match the schema format requested.
+- Keep `reasoning` brief and concise (maximum 2-3 sentences). Do NOT generate lengthy essays in `reasoning`.
+- Your response must strictly match the schema format requested.
 """
 

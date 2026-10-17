@@ -340,5 +340,20 @@ class LiteLLMProvider(LLMProvider):
 
         logger.info("llm_raw_structured_response", raw_content=raw_content)
         if issubclass(response_model, BaseModel):
-            return response_model.model_validate_json(raw_content)
+            try:
+                return response_model.model_validate_json(raw_content)
+            except Exception as parse_exc:
+                # Attempt light-weight repair for truncated JSON (e.g. unclosed string / braces)
+                try:
+                    fixed_content = raw_content.strip()
+                    # If cut off inside a string literal, close the quote
+                    if fixed_content.count('"') % 2 != 0:
+                        fixed_content += '"'
+                    # Balance curly braces
+                    open_braces = fixed_content.count("{") - fixed_content.count("}")
+                    if open_braces > 0:
+                        fixed_content += "}" * open_braces
+                    return response_model.model_validate_json(fixed_content)
+                except Exception:
+                    raise parse_exc
         return raw_content
